@@ -471,6 +471,24 @@ struct ProviderTests {
                 && !FileManager.default.fileExists(atPath: tmpPlistPath),
                "LaunchAtLogin.setEnabled / isEnabled: 写入包含 Label/RunAtLoad/ProgramArguments 的 LaunchAgent plist 并支持清理")
 
+        // —— 11. 上下文提问消息组装 PromptContextBuilder 契约 ——
+        expect(!PromptContextBuilder.canSubmitPrompt("")
+                && !PromptContextBuilder.canSubmitPrompt("   \n\t ")
+                && PromptContextBuilder.canSubmitPrompt("  总结核心观点  "),
+               "PromptContextBuilder.canSubmitPrompt: 空串/纯空白拒绝提交，非空内容允许提交")
+
+        let ctxMsgs = PromptContextBuilder.buildMessages(
+            context: .text("let x = 1"),
+            turns: [ConversationTurn(role: "user", content: "  解释类型推断  ")]
+        )
+        let hasSystemMsg = ctxMsgs.contains { ($0["role"] as? String) == "system" }
+        let firstMsgText = ctxMsgs.first?["content"] as? String ?? ""
+        expect(ctxMsgs.count == 1
+                && !hasSystemMsg
+                && firstMsgText.contains("let x = 1")
+                && firstMsgText.contains("解释类型推断"),
+               "PromptContextBuilder.buildMessages: 仅发送上下文与用户 Prompt，不附带默认 system prompt")
+
         print(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")
         exit(failures == 0 ? 0 : 1)
     }

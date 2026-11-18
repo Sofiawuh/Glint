@@ -12,6 +12,7 @@
 - 全新设计 Claude 暖纸书卷风（`#FAF9F5` + 开口灵光气泡 + `#D97757` 赤陶星芒 `✦`）品牌矢量 Logo（`images/logo.svg`）、macOS 原生应用图标（`Glint.icns`）与 18×18 自适应明暗菜单栏矢量图标（`BrandLogo.swift`）。
 
 ### Changed
+- **划词提问与截图提问改为「内存上下文暂存 + 用户自定义 Prompt」交互**：划词悬浮条右侧按钮改为「提问」，点击「提问」或完成 `⌃⌥E` 框选截图后先将文本/图片上下文暂存于内存并弹出紧凑提问卡片（展示摘要或缩略图预览并自动聚焦输入框，空输入禁用发送按钮并拦截回车误触），提交非空 Prompt 后不附带任何默认解释 System Prompt，直接将上下文与用户 Prompt 一并流式发送并原地向下生长为多轮会话窗；偏好设置「语言」页同步移除废弃的「解释 Prompt」配置。
 - **项目正式定名为 `Glint`**：应用包名统一为 `Glint.app` / `Glint.dmg`（Bundle ID `com.yoryon.glint`，源码目录 `glint-app/`），配置与日志目录统一为 `~/.config/glint/`，开机自启 LaunchAgent 统一为 `com.yoryon.glint.plist`。
 - 重写 `README.md` 门面文档（居中品牌 Logo、三合一动态演示视频 `images/demo.mp4` / `images/demo.gif`、Core ideas、Get started、Learn more），集中展示任意应用划词翻译、划词解释与 `⌃⌥E` 截图解释三大核心工作流。
 - 精简菜单栏下拉菜单（仅保留「设置…」与「退出」），并将偏好设置窗口升级为 macOS 原生工具栏图标样式的 **「基础」**、**「权限」**、**「服务商」**、**「语言」** 四 Tab 布局。

@@ -177,14 +177,13 @@ final class SettingsController: NSObject, NSWindowDelegate {
     private let baseField = NSTextField()
     private let keyField = NSSecureTextField()
     private let modelField = NSTextField()
-    private let visionCheck = NSButton(checkboxWithTitle: "支持看图(截图解释需要)", target: nil, action: nil)
+    private let visionCheck = NSButton(checkboxWithTitle: "支持看图(截图提问需要)", target: nil, action: nil)
     private let activeButton = NSButton(title: "设为当前使用", target: nil, action: nil)
     private let deleteButton = NSButton(title: "删除此服务商", target: nil, action: nil)
 
-    // Tab 3: 语言与 Prompt 控件
+    // Tab 3: 语言与自定义翻译 Prompt 控件
     private let languagePopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let translatePromptTextView = NSTextView()
-    private let explainPromptTextView = NSTextView()
     private let resetPromptsButton = NSButton(title: "恢复默认 Prompt", target: nil, action: nil)
 
     private var nameRow: NSStackView?
@@ -195,7 +194,6 @@ final class SettingsController: NSObject, NSWindowDelegate {
     private var working: [Provider] = []
     private var workingLanguage: String = AppConfig.defaultLanguage
     private var workingTranslatePrompt: String = AppConfig.defaultTranslatePrompt
-    private var workingExplainPrompt: String = AppConfig.defaultExplainPrompt
     private var activeIndex = 0
     private var selected = 0
     private let newItemTag = 9999
@@ -207,7 +205,6 @@ final class SettingsController: NSObject, NSWindowDelegate {
         if working.isEmpty { working = AppConfig.presets() }
         workingLanguage = AppConfig.shared.language
         workingTranslatePrompt = AppConfig.shared.translatePrompt
-        workingExplainPrompt = AppConfig.shared.explainPrompt
         activeIndex = working.firstIndex { $0.name == AppConfig.shared.activeName } ?? 0
         selected = activeIndex
         launchAtLoginCheck.state = LaunchAtLogin.isEnabled() ? .on : .off
@@ -318,14 +315,14 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
         let hkTitle = NSTextField(labelWithString: "⌃⌥E（Control + Option + E）")
         hkTitle.font = .systemFont(ofSize: 13)
-        let hkHint = NSTextField(labelWithString: "框选屏幕任意区域后交由多模态模型看图讲解")
+        let hkHint = NSTextField(labelWithString: "框选屏幕任意区域作为上下文，输入 Prompt 交由多模态模型回答")
         hkHint.font = .systemFont(ofSize: 11)
         hkHint.textColor = .secondaryLabelColor
         let hkStack = NSStackView(views: [hkTitle, hkHint])
         hkStack.orientation = .vertical
         hkStack.alignment = .leading
         hkStack.spacing = 3
-        let hkRow = prefRow(label: "截图解释", content: hkStack, alignTop: true)
+        let hkRow = prefRow(label: "截图提问", content: hkStack, alignTop: true)
 
         basicActiveIconView.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -384,7 +381,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         axTop.orientation = .horizontal
         axTop.spacing = 10
         axTop.alignment = .centerY
-        let axDesc = NSTextField(wrappingLabelWithString: "用于全局监听鼠标划词并直接读取选中文本(无此权限将无法弹出「翻译 / 解释」气泡)。")
+        let axDesc = NSTextField(wrappingLabelWithString: "用于全局监听鼠标划词并直接读取选中文本(无此权限将无法弹出「翻译 / 提问」气泡)。")
         axDesc.font = .systemFont(ofSize: 11)
         axDesc.textColor = .secondaryLabelColor
         axDesc.preferredMaxLayoutWidth = 310
@@ -401,7 +398,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         scrTop.orientation = .horizontal
         scrTop.spacing = 10
         scrTop.alignment = .centerY
-        let scrDesc = NSTextField(wrappingLabelWithString: "用于 ⌃⌥E 框选屏幕区域后截取画面交由多模态模型讲解。首次开启后通常需重新打开 Glint 生效。")
+        let scrDesc = NSTextField(wrappingLabelWithString: "用于 ⌃⌥E 框选屏幕区域后将画面作为上下文向多模态模型提问。首次开启后通常需重新打开 Glint 生效。")
         scrDesc.font = .systemFont(ofSize: 11)
         scrDesc.textColor = .secondaryLabelColor
         scrDesc.preferredMaxLayoutWidth = 310
@@ -539,7 +536,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         langTopBar.spacing = 10
         langTopBar.alignment = .centerY
 
-        let langHint = NSTextField(wrappingLabelWithString: "替换下方 Prompt 中的 <languages> 占位符（若删掉占位符，则语言选择对该 Prompt 不生效）。")
+        let langHint = NSTextField(wrappingLabelWithString: "替换下方翻译 Prompt 中的 <languages> 占位符（若删掉占位符，则语言选择不生效；划词/截图提问直接按你输入的 Prompt 发送）。")
         langHint.font = .systemFont(ofSize: 11)
         langHint.textColor = .secondaryLabelColor
         langHint.preferredMaxLayoutWidth = 365
@@ -550,11 +547,8 @@ final class SettingsController: NSObject, NSWindowDelegate {
         langCol.spacing = 4
         let langRow = fieldRowTop("目标语言", langCol)
 
-        let transScroll = makePromptEditorScrollView(textView: translatePromptTextView, height: 68)
+        let transScroll = makePromptEditorScrollView(textView: translatePromptTextView, height: 120)
         let transRow = fieldRowTop("翻译 Prompt", transScroll)
-
-        let explainScroll = makePromptEditorScrollView(textView: explainPromptTextView, height: 148)
-        let explainRow = fieldRowTop("解释 Prompt", explainScroll)
 
         let vGap = NSView()
         vGap.translatesAutoresizingMaskIntoConstraints = false
@@ -574,7 +568,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         bottom.orientation = .horizontal
         bottom.spacing = 8
 
-        let stack = NSStackView(views: [langRow, transRow, explainRow, vGap, sep, bottom])
+        let stack = NSStackView(views: [langRow, transRow, vGap, sep, bottom])
         stack.orientation = .vertical
         stack.spacing = 12
         stack.alignment = .leading
@@ -878,7 +872,6 @@ final class SettingsController: NSObject, NSWindowDelegate {
             languagePopup.selectItem(at: 0)
         }
         translatePromptTextView.string = workingTranslatePrompt
-        explainPromptTextView.string = workingExplainPrompt
     }
 
     private func flushLanguageForm() {
@@ -889,10 +882,6 @@ final class SettingsController: NSObject, NSWindowDelegate {
         if !tStr.isEmpty {
             workingTranslatePrompt = translatePromptTextView.string
         }
-        let eStr = explainPromptTextView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !eStr.isEmpty {
-            workingExplainPrompt = explainPromptTextView.string
-        }
     }
 
     @objc private func onLanguagePopupChanged() {
@@ -901,9 +890,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     @objc private func onResetPrompts() {
         workingTranslatePrompt = AppConfig.defaultTranslatePrompt
-        workingExplainPrompt = AppConfig.defaultExplainPrompt
         translatePromptTextView.string = workingTranslatePrompt
-        explainPromptTextView.string = workingExplainPrompt
     }
 
     @objc private func save() {
@@ -915,12 +902,11 @@ final class SettingsController: NSObject, NSWindowDelegate {
         if !AppConfig.shared.setProviders(working, active: activeName) {
             alert("保存失败:无法写入配置文件(~/.config/glint)。请检查磁盘空间或目录权限。"); return
         }
-        if !AppConfig.shared.setLanguageAndPrompts(
+        if !AppConfig.shared.setLanguageAndTranslatePrompt(
             language: workingLanguage,
-            translatePrompt: workingTranslatePrompt,
-            explainPrompt: workingExplainPrompt
+            translatePrompt: workingTranslatePrompt
         ) {
-            alert("保存语言与 Prompt 配置失败:无法写入配置文件(~/.config/glint)。"); return
+            alert("保存语言与翻译 Prompt 配置失败:无法写入配置文件(~/.config/glint)。"); return
         }
         gAppDelegate?.refreshMenu()
         window?.close()

@@ -438,15 +438,6 @@ final class AppConfig {
 
     static let defaultTranslatePrompt = "You are a professional translation engine. Translate the user's text into <languages>. Output ONLY the translation itself — no explanations, no quotes, no extra words."
 
-    static let defaultExplainPrompt = """
-    你是一个善于把复杂概念和代码讲清楚的助手。请以 <languages> 回答,解释用户给出的内容,帮他真正理解。
-    - 如果是代码:先说它整体在做什么,再逐步拆解关键逻辑,点出涉及的语法、库或设计意图,必要时给一句类比或小例子。
-    - 如果是术语、论文或概念:先用 `## 整体在讲什么` 一两段话点透核心主旨,再用 `## 关键概念拆解` 配合 `### 子概念标题` 分模块讲清它是什么、为什么重要、怎么运作。
-    - 如果是图片:先一句说清这张图整体是什么(截图/图表/报错/界面/照片/文档…),再解读其中关键信息。报错或代码截图就定位问题并给排查/解决方向;图表就读出趋势与要点;界面或流程就说清它在干什么。
-    - 内容简短就简短回答(几句话点透),内容复杂就分点详解。直接开始,不要寒暄,不要复述原文。
-    - 后续若有追问,延续上下文回答。
-    """
-
     static func resolvePrompt(_ prompt: String, language: String) -> String {
         let lang = language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultLanguage : language
         return prompt.replacingOccurrences(of: languagePlaceholder, with: lang)
@@ -456,15 +447,10 @@ final class AppConfig {
     private(set) var activeName: String = ""
     private(set) var language: String = AppConfig.defaultLanguage
     private(set) var translatePrompt: String = AppConfig.defaultTranslatePrompt
-    private(set) var explainPrompt: String = AppConfig.defaultExplainPrompt
     private var path: String { kConfigDir + "/config.json" }
 
     var resolvedTranslatePrompt: String {
         AppConfig.resolvePrompt(translatePrompt, language: language)
-    }
-
-    var resolvedExplainPrompt: String {
-        AppConfig.resolvePrompt(explainPrompt, language: language)
     }
 
     // 当前厂商:按名字找;找不到回退第一条(永不为 nil,只要至少一条)
@@ -475,7 +461,6 @@ final class AppConfig {
         var providers: [Provider]
         var language: String?
         var translatePrompt: String?
-        var explainPrompt: String?
     }
 
     // 官方支持的四大预置厂商: DeepSeek、Gemini、Vertex AI、MiMo
@@ -563,10 +548,7 @@ final class AppConfig {
             language = rawLang.isEmpty ? AppConfig.defaultLanguage : rawLang
             let rawTrans = stored.translatePrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             translatePrompt = rawTrans.isEmpty ? AppConfig.defaultTranslatePrompt : (stored.translatePrompt ?? AppConfig.defaultTranslatePrompt)
-            let rawExplain = stored.explainPrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let isLegacyExplainDefault = rawExplain.contains("- 排版纪律:列表项 `- ` 内部**仅对核心术语或短标签保留加粗**")
-            explainPrompt = (rawExplain.isEmpty || isLegacyExplainDefault) ? AppConfig.defaultExplainPrompt : (stored.explainPrompt ?? AppConfig.defaultExplainPrompt)
-            if merged != stored.providers || stored.language == nil || stored.translatePrompt == nil || stored.explainPrompt == nil || isLegacyExplainDefault {
+            if merged != stored.providers || stored.language == nil || stored.translatePrompt == nil {
                 save()
             }
             return
@@ -575,7 +557,6 @@ final class AppConfig {
         activeName = "MiMo"
         language = AppConfig.defaultLanguage
         translatePrompt = AppConfig.defaultTranslatePrompt
-        explainPrompt = AppConfig.defaultExplainPrompt
         save()
     }
 
@@ -586,8 +567,7 @@ final class AppConfig {
             active: activeName,
             providers: providers,
             language: language,
-            translatePrompt: translatePrompt,
-            explainPrompt: explainPrompt
+            translatePrompt: translatePrompt
         )
         guard let data = try? enc.encode(payload) else { return false }
         try? FileManager.default.createDirectory(atPath: kConfigDir, withIntermediateDirectories: true, attributes: nil)
@@ -607,17 +587,92 @@ final class AppConfig {
     }
 
     @discardableResult
-    func setLanguageAndPrompts(language newLang: String, translatePrompt newTrans: String, explainPrompt newExplain: String) -> Bool {
-        let oldL = language, oldT = translatePrompt, oldE = explainPrompt
+    func setLanguageAndTranslatePrompt(language newLang: String, translatePrompt newTrans: String) -> Bool {
+        let oldL = language, oldT = translatePrompt
         let cleanL = newLang.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanT = newTrans.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanE = newExplain.trimmingCharacters(in: .whitespacesAndNewlines)
         language = cleanL.isEmpty ? AppConfig.defaultLanguage : cleanL
         translatePrompt = cleanT.isEmpty ? AppConfig.defaultTranslatePrompt : newTrans
-        explainPrompt = cleanE.isEmpty ? AppConfig.defaultExplainPrompt : newExplain
         if save() { return true }
-        language = oldL; translatePrompt = oldT; explainPrompt = oldE
+        language = oldL; translatePrompt = oldT
         return false
+    }
+}
+
+enum PromptContextPayload: Equatable {
+    case text(String)
+    case imageDataURL(String)
+}
+
+struct ConversationTurn: Equatable {
+    let role: String
+    let content: String
+
+    init(role: String, content: String) {
+        self.role = role
+        self.content = content
+    }
+}
+
+enum PromptContextBuilder {
+    static func canSubmitPrompt(_ rawPrompt: String) -> Bool {
+        !rawPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static func previewSnippet(for selectedText: String, maxLines: Int = 3, maxChars: Int = 180) -> String {
+        let normalized = selectedText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return "" }
+
+        let safeMaxLines = max(1, maxLines)
+        let safeMaxChars = max(1, maxChars)
+        let allLines = normalized
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !allLines.isEmpty else { return "" }
+
+        var truncated = allLines.count > safeMaxLines
+        var joined = allLines.prefix(safeMaxLines).joined(separator: "\n")
+        if joined.count > safeMaxChars {
+            truncated = true
+            let keepCount = max(1, safeMaxChars - 1)
+            joined = String(joined.prefix(keepCount)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return truncated ? (joined + "…") : joined
+    }
+
+    static func formatTextWithPrompt(contextText: String, userPrompt: String) -> String {
+        let prompt = userPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "<context>\n\(contextText)\n</context>\n\n\(prompt)"
+    }
+
+    static func buildMessages(context: PromptContextPayload, turns: [ConversationTurn]) -> [[String: Any]] {
+        guard !turns.isEmpty else { return [] }
+        var messages: [[String: Any]] = []
+        for (i, turn) in turns.enumerated() {
+            if i == 0 && turn.role == "user" {
+                switch context {
+                case .text(let ctxText):
+                    messages.append([
+                        "role": "user",
+                        "content": formatTextWithPrompt(contextText: ctxText, userPrompt: turn.content)
+                    ])
+                case .imageDataURL(let dataURL):
+                    let prompt = turn.content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let parts: [[String: Any]] = [
+                        ["type": "image_url", "image_url": ["url": dataURL]],
+                        ["type": "text", "text": prompt]
+                    ]
+                    messages.append(["role": "user", "content": parts])
+                }
+            } else {
+                messages.append(["role": turn.role, "content": turn.content])
+            }
+        }
+        return messages
     }
 }
 

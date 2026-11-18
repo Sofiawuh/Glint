@@ -33,6 +33,7 @@ def _compile_and_run_swift_probe(probe_source: str) -> subprocess.CompletedProce
             capture_output=True,
             text=True,
             check=False,
+            timeout=30,
         )
         if compile_proc.returncode != 0:
             return compile_proc
@@ -48,6 +49,7 @@ def _compile_and_run_swift_probe(probe_source: str) -> subprocess.CompletedProce
             text=True,
             env=env,
             check=False,
+            timeout=30,
         )
 
 
@@ -92,7 +94,7 @@ print("SUPPORTED_LANGUAGES_OK")
         )
         self.assertIn("SUPPORTED_LANGUAGES_OK", proc.stdout)
 
-    def test_default_prompts_contain_languages_placeholder_and_substitute_selected_language(
+    def test_default_translate_prompt_contains_languages_placeholder_and_substitutes_selected_language(
         self,
     ) -> None:
         probe_source = """import Foundation
@@ -101,36 +103,23 @@ guard AppConfig.defaultTranslatePrompt.contains("<languages>") else {
     fputs("FAIL: defaultTranslatePrompt must contain <languages>\\n", stderr)
     exit(1)
 }
-guard AppConfig.defaultExplainPrompt.contains("<languages>") else {
-    fputs("FAIL: defaultExplainPrompt must contain <languages>\\n", stderr)
-    exit(1)
-}
-guard !AppConfig.defaultExplainPrompt.contains("排版纪律") else {
-    fputs("FAIL: defaultExplainPrompt must not contain 排版纪律\\n", stderr)
-    exit(1)
-}
 
 let resolvedTranslate = AppConfig.resolvePrompt(AppConfig.defaultTranslatePrompt, language: "Russian")
-let resolvedExplain = AppConfig.resolvePrompt(AppConfig.defaultExplainPrompt, language: "Russian")
 
 guard !resolvedTranslate.contains("<languages>") && resolvedTranslate.contains("Russian") else {
     fputs("FAIL: resolvedTranslate did not substitute <languages> with Russian: \\(resolvedTranslate)\\n", stderr)
     exit(1)
 }
-guard !resolvedExplain.contains("<languages>") && resolvedExplain.contains("Russian") else {
-    fputs("FAIL: resolvedExplain did not substitute <languages> with Russian: \\(resolvedExplain)\\n", stderr)
-    exit(1)
-}
 
-print("DEFAULT_PROMPTS_SUBSTITUTE_OK")
+print("DEFAULT_TRANSLATE_PROMPT_SUBSTITUTE_OK")
 """
         proc = _compile_and_run_swift_probe(probe_source)
         self.assertEqual(
             proc.returncode,
             0,
-            f"Default prompt placeholder substitution probe failed:\n{proc.stderr}",
+            f"Default translate prompt placeholder substitution probe failed:\n{proc.stderr}",
         )
-        self.assertIn("DEFAULT_PROMPTS_SUBSTITUTE_OK", proc.stdout)
+        self.assertIn("DEFAULT_TRANSLATE_PROMPT_SUBSTITUTE_OK", proc.stdout)
 
     def test_custom_prompt_without_placeholder_ignores_selected_language(
         self,
@@ -211,43 +200,69 @@ guard !AppConfig.shared.resolvedTranslatePrompt.contains("<languages>")
     fputs("FAIL: default resolvedTranslatePrompt invalid: \\(AppConfig.shared.resolvedTranslatePrompt)\\n", stderr)
     exit(1)
 }
-guard !AppConfig.shared.resolvedExplainPrompt.contains("<languages>")
-        && AppConfig.shared.resolvedExplainPrompt.contains("Simplified Chinese") else {
-    fputs("FAIL: default resolvedExplainPrompt invalid: \\(AppConfig.shared.resolvedExplainPrompt)\\n", stderr)
+
+let legacyWithExplainJSON = \"\"\"
+{
+  "active": "DeepSeek",
+  "language": "English",
+  "translatePrompt": "Legacy translate to <languages>.",
+  "explainPrompt": "Obsolete legacy explain prompt in <languages>.",
+  "providers": [
+    {
+      "name": "DeepSeek",
+      "format": "openai",
+      "baseURL": "https://api.deepseek.com/v1",
+      "apiKey": "sk-test",
+      "model": "deepseek-chat",
+      "vision": false
+    }
+  ]
+}
+\"\"\"
+try! legacyWithExplainJSON.write(toFile: glintConfigPath, atomically: true, encoding: .utf8)
+
+AppConfig.shared.load()
+guard AppConfig.shared.activeName == "DeepSeek",
+      let dsLegacy = AppConfig.shared.providers.first(where: { $0.name == "DeepSeek" }),
+      dsLegacy.apiKey == "sk-test",
+      AppConfig.shared.language == "English",
+      AppConfig.shared.resolvedTranslatePrompt == "Legacy translate to English." else {
+    fputs("FAIL: legacy config with obsolete explainPrompt failed to load cleanly\\n", stderr)
     exit(1)
 }
 
 let customTranslate = "Custom translate into <languages> only."
-let customExplain = "Custom explain in <languages> clearly."
-let saved = AppConfig.shared.setLanguageAndPrompts(
+let saved = AppConfig.shared.setLanguageAndTranslatePrompt(
     language: "Russian",
-    translatePrompt: customTranslate,
-    explainPrompt: customExplain
+    translatePrompt: customTranslate
 )
 guard saved else {
-    fputs("FAIL: setLanguageAndPrompts returned false\\n", stderr)
+    fputs("FAIL: setLanguageAndTranslatePrompt returned false\\n", stderr)
     exit(1)
 }
 guard AppConfig.shared.language == "Russian"
-        && AppConfig.shared.translatePrompt == customTranslate
-        && AppConfig.shared.explainPrompt == customExplain else {
-    fputs("FAIL: in-memory properties not updated after setLanguageAndPrompts\\n", stderr)
+        && AppConfig.shared.translatePrompt == customTranslate else {
+    fputs("FAIL: in-memory properties not updated after setLanguageAndTranslatePrompt\\n", stderr)
     exit(1)
 }
 guard AppConfig.shared.resolvedTranslatePrompt == "Custom translate into Russian only." else {
     fputs("FAIL: unexpected resolvedTranslatePrompt: \\(AppConfig.shared.resolvedTranslatePrompt)\\n", stderr)
     exit(1)
 }
-guard AppConfig.shared.resolvedExplainPrompt == "Custom explain in Russian clearly." else {
-    fputs("FAIL: unexpected resolvedExplainPrompt: \\(AppConfig.shared.resolvedExplainPrompt)\\n", stderr)
+
+guard let diskData = fm.contents(atPath: glintConfigPath),
+      let diskJSON = try? JSONSerialization.jsonObject(with: diskData) as? [String: Any],
+      diskJSON["language"] as? String == "Russian",
+      diskJSON["translatePrompt"] as? String == customTranslate else {
+    fputs("FAIL: ~/.config/glint/config.json on disk missing saved language or custom translate prompt\\n", stderr)
     exit(1)
 }
 
-guard let diskText = try? String(contentsOfFile: glintConfigPath, encoding: .utf8),
-      diskText.contains("Russian"),
-      diskText.contains(customTranslate),
-      diskText.contains(customExplain) else {
-    fputs("FAIL: ~/.config/glint/config.json on disk missing saved language or custom prompts\\n", stderr)
+AppConfig.shared.load()
+guard AppConfig.shared.language == "Russian",
+      AppConfig.shared.translatePrompt == customTranslate,
+      AppConfig.shared.resolvedTranslatePrompt == "Custom translate into Russian only." else {
+    fputs("FAIL: roundtrip reload did not preserve language or custom translate prompt\\n", stderr)
     exit(1)
 }
 
@@ -283,15 +298,15 @@ print("PERSISTENCE_ROUNDTRIP_OK")
             main_content,
             "glint-app/main.swift must not use legacy single-hanzi heuristic hasChinese(",
         )
+        self.assertNotIn(
+            "resolvedExplainPrompt",
+            main_content,
+            "glint-app/main.swift must not reference legacy resolvedExplainPrompt",
+        )
         self.assertIn(
             "AppConfig.shared.resolvedTranslatePrompt",
             main_content,
             "glint-app/main.swift must use AppConfig.shared.resolvedTranslatePrompt for translation",
-        )
-        self.assertIn(
-            "AppConfig.shared.resolvedExplainPrompt",
-            main_content,
-            "glint-app/main.swift must use AppConfig.shared.resolvedExplainPrompt for explanation",
         )
 
         settings_content = SETTINGS_SWIFT.read_text(encoding="utf-8")
@@ -299,6 +314,11 @@ print("PERSISTENCE_ROUNDTRIP_OK")
             '"语言"',
             settings_content,
             'glint-app/Settings.swift must include the "语言" tab in Preferences',
+        )
+        self.assertNotIn(
+            "解释 Prompt",
+            settings_content,
+            'glint-app/Settings.swift must not include legacy "解释 Prompt" setting',
         )
 
 

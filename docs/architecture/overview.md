@@ -17,11 +17,11 @@ flowchart LR
     Config --> LLM["多协议模型接口\n(OpenAI / Anthropic / Gemini)"]
 ```
 
-- **主控与会话浮窗**（[glint-app/main.swift](../../glint-app/main.swift)）：负责应用生命周期（`AppDelegate`）、全局鼠标划词监听（`CGEventTap`）、AX/剪贴板取词、翻译与流式对话网络请求（`translate` / `chatStream`）以及毛玻璃浮窗控制器（`PopupController`）。
+- **主控与会话浮窗**（[glint-app/main.swift](../../glint-app/main.swift)）：负责应用生命周期（`AppDelegate`）、全局鼠标划词监听（`CGEventTap`）、AX/剪贴板取词、翻译与流式对话网络请求（`translate` / `chatStream`）以及毛玻璃浮窗控制器（`PopupController`，管理紧凑提问卡片、内存上下文暂存与流式会话展开）。
 - **几何定位模块**（[glint-app/Geometry.swift](../../glint-app/Geometry.swift)）：纯几何函数层，负责计算划词气泡与浮窗在屏幕可视区内的落点矩形与边界夹紧，不直接耦合 `NSScreen`/`NSEvent`，配套单测位于 [glint-app/geometry_tests.swift](../../glint-app/geometry_tests.swift)。
 - **块级 Markdown 渲染**（[glint-app/Markdown.swift](../../glint-app/Markdown.swift)）：将模型输出的 Markdown（标题、多级列表、GFM 表格、代码块、行内样式）解析为 AppKit `NSAttributedString`，并通过 `CodeBlockLayoutManager` 绘制代码块圆角底色，配套单测位于 [glint-app/markdown_tests.swift](../../glint-app/markdown_tests.swift)。
 - **框选截图模块**（[glint-app/Screenshot.swift](../../glint-app/Screenshot.swift)）：提供全屏遮罩框选（`RegionCapture`）、遮罩下层真实画面截取（`CGWindowListCreateImage`）及 PNG Base64 Data URL 编码。
-- **配置持久化与多协议适配**（[glint-app/Config.swift](../../glint-app/Config.swift)、[glint-app/Settings.swift](../../glint-app/Settings.swift)）：管理多厂商配置列表（`Provider` / `AppConfig`），内置 **DeepSeek**、**Gemini**、**Vertex AI**、**MiMo** 四大官方预设，支持 `OpenAI 兼容`、`Anthropic 兼容`、`Gemini 兼容` 三种协议的请求构造与流式/非流式解析，读写 `~/.config/glint/config.json`，配套单测位于 [glint-app/provider_tests.swift](../../glint-app/provider_tests.swift)。
+- **配置持久化与多协议适配**（[glint-app/Config.swift](../../glint-app/Config.swift)、[glint-app/Settings.swift](../../glint-app/Settings.swift)）：管理多厂商配置列表（`Provider` / `AppConfig`）与上下文消息组装纯函数层（`PromptContextBuilder`），内置 **DeepSeek**、**Gemini**、**Vertex AI**、**MiMo** 四大官方预设，支持 `OpenAI 兼容`、`Anthropic 兼容`、`Gemini 兼容` 三种协议的请求构造与流式/非流式解析，读写 `~/.config/glint/config.json`，配套单测位于 [glint-app/provider_tests.swift](../../glint-app/provider_tests.swift)。
 - **品牌图标与菜单栏矢量徽标**（[glint-app/BrandLogo.swift](../../glint-app/BrandLogo.swift)）：采用与 `ClaudeTheme` 统一的暖纸书卷（`#FAF9F5`）、深炭墨气泡与赤陶星芒（`#D97757`）设计语言，绘制 macOS 应用图标（`Glint.icns` / `NSApp.applicationIconImage`）及自适应明暗模式的 18×18 菜单栏 Template 矢量图标（`NSStatusItem`）。
 - **构建与打包脚本**（[glint-app/build.sh](../../glint-app/build.sh)）：编译 `arm64 + x86_64` 通用二进制、生成 `Glint.icns` 应用图标、组装 `Glint.app`、执行代码签名并打包 `Glint.dmg`。
 
@@ -31,26 +31,34 @@ flowchart LR
 sequenceDiagram
     participant User as 用户鼠标/热键
     participant Tap as CGEventTap / HotKey
-    participant Extractor as AX / Pasteboard 取词
+    participant Extractor as AX / Pasteboard / Screenshot
     participant Geo as Geometry 定位计算
     participant Popup as PopupController 浮窗
+    participant Builder as PromptContextBuilder
     participant API as OpenAI / Anthropic / Gemini 接口
 
-    User->>Tap: 拖拽释放 (leftMouseUp)
-    Tap->>Extractor: 后台线程读取选中文本 (AX 优先, Cmd+C 兜底)
-    Extractor-->>Popup: 返回选中文本与释放时光标坐标
-    Popup->>Geo: 计算光标右下角浮窗矩形并夹紧可视区
+    User->>Tap: 拖拽划词释放 或 按下 ⌃⌥E 框选截图
+    Tap->>Extractor: 读取选中文本 / 截取选区画面并编码 Data URL
+    Extractor-->>Popup: 返回文本或图像（暂存于内存，不自动发请求）
+    Popup->>Geo: 计算光标右下角/屏幕居中矩形并夹紧可视区
     Geo-->>Popup: 返回 NSRect
-    Popup-->>User: 在光标右下角展示「🌐 翻译 | 💡 解释」气泡
-    User->>Popup: 点击「翻译」或「解释」/ 提交追问
-    Popup->>API: 按当前厂商协议发起非流式或 SSE 流式请求
-    API-->>Popup: 返回译文或流式增量 delta
-    Popup-->>User: 顶左锚点固定向下生长并渲染 Markdown
+    Popup-->>User: 划词显示「翻译 | 提问」胶囊；点击「提问」或完成截图后弹出紧凑提问卡片
+    alt 点击「翻译」
+        Popup->>API: 附带翻译 System Prompt 发起非流式请求
+        API-->>Popup: 返回译文并自适应尺寸显示
+    else 点击「提问」或完成截图
+        User->>Popup: 在紧凑卡片输入非空 Prompt 并回车
+        Popup->>Builder: 组装「内存上下文 + 用户 Prompt」（不带默认 System Prompt）
+        Builder-->>Popup: 返回多轮/多模态消息数组
+        Popup->>API: 发起 SSE 流式请求
+        API-->>Popup: 返回流式增量 delta
+        Popup-->>User: 原地顶左锚定向下生长为流式 Markdown 会话窗（支持追问）
+    end
 ```
 
 - **关键数据结构**：
-  - `APIFormat`、`Provider` 与 `AppConfig`（定义于 [glint-app/Config.swift](../../glint-app/Config.swift)）：描述模型厂商名称、协议格式（`openai` / `anthropic` / `gemini`）、`baseURL`、`apiKey`、`model` 与 `vision` 能力标记。
-  - `PopupController` 会话状态（定义于 [glint-app/main.swift](../../glint-app/main.swift)）：维护 `convo` 上下文消息数组、`attachedImageDataURL` 多模态图片缓存以及 `generation` 异步回调作废令牌。
+  - `APIFormat`、`Provider`、`AppConfig`、`PromptContextPayload`、`ConversationTurn` 与 `PromptContextBuilder`（定义于 [glint-app/Config.swift](../../glint-app/Config.swift)）：描述模型厂商协议格式（`openai` / `anthropic` / `gemini`）、多厂商配置以及文本/图像上下文与用户 Prompt 的无默认 System Prompt 消息组装。
+  - `PopupController` 会话状态（定义于 [glint-app/main.swift](../../glint-app/main.swift)）：维护内存上下文 `sessionContext`、`convo` 对话轮次、`isAwaitingInitialPrompt` 提问卡片状态以及 `generation` 异步回调作废令牌。
 
 ## 3. 系统不变量与边界约束
 

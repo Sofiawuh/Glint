@@ -4,11 +4,11 @@ import Carbon.HIToolbox
 import os.log
 
 // ============================================================
-// Glint —— 划词翻译 / 解释 / 截图解释 菜单栏小程序
-// 选中文字 → 选区旁冒泡「🌐 翻译」「💡 解释」→ 点击 → 同处显示结果
+// Glint —— 划词翻译 / 划词提问 / 截图提问 菜单栏小程序
+// 选中文字 → 选区旁冒泡「翻译」「提问」
 //   翻译:自动识别源语言并翻译为「语言」设置中选定的目标语言
-//   解释:以目标语言把概念/代码讲明白,流式逐字输出(打字机)
-//   截图解释:⌃⌥E 框选屏幕 → 多模态看图讲解(可追问)
+//   提问:将划选内容作为上下文暂存内存,弹出输入框让用户输入 Prompt 一并发送(流式 + 多轮追问)
+//   截图提问:⌃⌥E 框选屏幕 → 将截图作为上下文暂存内存,输入 Prompt 后由多模态模型回答(可追问)
 // ============================================================
 
 // MARK: - 路径 / 配置目录(最先初始化,保证日志可写,常量见 Config.swift)
@@ -170,7 +170,7 @@ func translate(_ text: String, completion: @escaping (String?, String?) -> Void)
     }.resume()
 }
 
-// MARK: - 解释 / 追问(支持 OpenAI / Anthropic / Gemini 流式 / SSE)
+// MARK: - 提问 / 追问(支持 OpenAI / Anthropic / Gemini 流式 / SSE)
 
 // 通用流式对话:messages 为完整消息数组(含 system);逐字回吐(打字机)。
 // 返回可取消的 Task;无 key 等同步错误时回调 onError 并返回 nil。
@@ -244,11 +244,22 @@ func enableBackgroundCursorSetting() {
     _ = setProp(cid, cid, "SetsCursorInBackground" as CFString, kCFBooleanTrue)
 }
 
-// 可成为 key 的浮窗:让用户能在结果里拖选译文 + ⌘C(并禁止 AppKit 跨屏重定向已由 clampToScreen 计算好的坐标)
+// 可成为 key 的浮窗:让用户能在结果里拖选译文 + ⌘C、在提问框输入与按 Esc 关闭(并禁止 AppKit 跨屏重定向已由 clampToScreen 计算好的坐标)
 final class KeyablePanel: NSPanel {
+    var onCancel: (() -> Void)?
     override var canBecomeKey: Bool { true }
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         return frameRect
+    }
+    override func cancelOperation(_ sender: Any?) {
+        onCancel?()
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {
+            onCancel?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }
 
@@ -422,11 +433,11 @@ final class DraggablePaperView: NSView {
     }
 }
 
-// 划词快捷悬浮条内嵌分段按钮(图2:无系统 Emoji,采用 1.5px 线性经纬地球 / 赤陶色四角星芒图标 + #EFECE6 独立悬停圆角块)
+// 划词快捷悬浮条内嵌分段按钮(无系统 Emoji,采用 1.5px 线性经纬地球 / 赤陶色四角星芒图标 + #EFECE6 独立悬停圆角块)
 final class ActionPillButton: NSButton {
     enum Kind {
         case translate
-        case explain
+        case ask
     }
 
     private var trackingAreaRef: NSTrackingArea?
@@ -494,7 +505,7 @@ final class ActionPillButton: NSButton {
         switch kind {
         case .translate:
             drawGlobeIcon(in: iconRect, color: globeColor)
-        case .explain:
+        case .ask:
             drawSparklesIcon(in: iconRect, color: ClaudeTheme.terracotta)
         }
 
@@ -843,7 +854,37 @@ final class ResizeGripView: NSView {
     }
 }
 
+// 紧凑提问卡片内的上下文预览底框(暖米色 #F3EFE6 + #E8E3D7 细边框 + 9pt 圆角,支持拖动卡片)
+final class PromptPreviewCardView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        let r = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: r, xRadius: 9, yRadius: 9)
+        ClaudeTheme.calloutBg.setFill()
+        path.fill()
+        ClaudeTheme.calloutBorder.setStroke()
+        path.lineWidth = 1.0
+        path.stroke()
+    }
+}
+
+final class PreviewSnippetTextView: NSTextView {
+    override var mouseDownCanMoveWindow: Bool { true }
+}
+
 final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+    private enum SessionContext {
+        case text(String)
+        case image(NSImage, dataURL: String)
+
+        var payload: PromptContextPayload {
+            switch self {
+            case .text(let text): return .text(text)
+            case .image(_, let dataURL): return .imageDataURL(dataURL)
+            }
+        }
+    }
+
     private var panel: NSPanel?
     private var body: NSView?
     private var pendingText: String?
@@ -855,16 +896,20 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private let dismissDur: TimeInterval = 0.10
     private let switchDur: TimeInterval = 0.16
 
-    // 会话(解释 + 追问)状态
-    private var convo: [(role: String, content: String)] = []   // 不含 system;首条 user 为原文
-    private var attachedImageDataURL: String?                    // 截图解释:本轮会话附带的图(base64 data URL),整段会话期间保留、每轮重发
+    // 会话(上下文 + 提问 + 追问)状态
+    private var sessionContext: SessionContext?                  // 暂存内存中的划选文本或截图编码,按需随用户 Prompt 发送
+    private var convo: [ConversationTurn] = []                   // 不含 system;首条 user 为用户输入 Prompt
+    private var isAwaitingInitialPrompt = false                  // true = 处于紧凑提问卡片等待输入首条 Prompt
+    private var inputEnabledState = false                        // 输入框整体可用开关(发送按钮另叠加非空校验)
+    private var contextHeaderEndLoc = 0                          // 会话 transcript 顶部上下文预览区结束位置
+    private var lastErrorLoc: Int?                               // 最近一次错误提示在 transcript 的起点,重试前清理
     private var convoTextView: NSTextView?                       // 整段对话的 transcript
     private var convoScroll: NSScrollView?
-    private var askField: FocusAwareTextField?                   // 底部追问输入框
+    private var askField: FocusAwareTextField?                   // 底部提问/追问输入框
     private var convoTask: Task<Void, Never>?
     private var assistantStart = 0                               // 当前 assistant 流式段在 transcript 的起点
     private var assistantAccum = ""
-    private var turnStartLoc = 0                                 // 本轮(含追问气泡)在 transcript 的起点,失败可整轮回滚
+    private var turnStartLoc = 0                                 // 本轮(含提问/追问气泡)在 transcript 的起点,失败可整轮回滚
     private var generation = 0                                   // 递增令牌:关闭/新划词时 +1,作废在途的非流式回调(翻译)
     private var uiTestMode = false                               // GLINT_UITEST:自测模式(程序化驱动 + 截图 + 长高日志)
     private let convoFont = NSFont.systemFont(ofSize: 14.5)
@@ -880,6 +925,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var programmaticSize = NSSize.zero                   // 最近一次程序化 setFrame 的目标尺寸(识别假 live resize 用)
     private let kPopupSizeKey = "popupSize"
     private let minPopupSize = NSSize(width: 320, height: 200)
+    private let minCompactSize = NSSize(width: 120, height: 34)
     private let defaultPopupSize = NSSize(width: 500, height: 460)
 
     var isVisible: Bool { panel != nil }
@@ -907,7 +953,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         paper.borderColor = isPill ? ClaudeTheme.pillBorder : ClaudeTheme.windowBorder
     }
 
-    // 图2:划词后的快捷悬浮条(Segmented Pill:4px 内边距、无硬分割线、1.5px 线性图标、#EFECE6 独立悬停块)
+    // 划词后的快捷悬浮条(Segmented Pill:4px 内边距、无硬分割线、1.5px 线性图标、#EFECE6 独立悬停块)
     func showButton(text: String, fallbackPoint: NSPoint) {
         NSCursor.arrow.set()
         generation += 1
@@ -937,9 +983,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         container.addSubview(tBtn)
 
         let eBtn = ActionPillButton(frame: NSRect(x: pad + bw + gap, y: pad, width: bw, height: bh),
-                                    kind: .explain, labelText: "解释")
+                                    kind: .ask, labelText: "提问")
         eBtn.target = self
-        eBtn.action = #selector(onExplainClicked)
+        eBtn.action = #selector(onAskClicked)
         container.addSubview(eBtn)
 
         present(content: container, rect: rect, isPill: true)
@@ -950,7 +996,11 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // 避免 autoresize 以动画中途的尺寸为基准把内容压缩/挤出可视区;动画完成后再恢复跟随窗口。
     private func present(content newBody: NSView, rect: NSRect, isPill: Bool = false) {
         programmaticSize = rect.size
+        let targetMinSize = panelIsResizable
+            ? NSSize(width: min(rect.width, minPopupSize.width), height: min(rect.height, minPopupSize.height))
+            : minCompactSize
         if let p = panel, let paper = p.contentView {
+            p.minSize = targetMinSize
             applyPaperStyle(isPill: isPill, to: p)
             let finalMask = newBody.autoresizingMask
             newBody.autoresizingMask = [.minYMargin]
@@ -976,9 +1026,13 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 guard self.body === newBody, let paper2 = self.panel?.contentView else { return }
                 newBody.frame = paper2.bounds
                 newBody.autoresizingMask = finalMask
+                if self.isAwaitingInitialPrompt {
+                    self.focusAskField()
+                }
             })
         } else {
             let p = makePanel(rect, isPill: isPill)
+            p.minSize = targetMinSize
             newBody.frame = NSRect(origin: .zero, size: rect.size)
             p.contentView?.addSubview(newBody)
             body = newBody
@@ -1060,20 +1114,233 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         scroll.autohidesScrollers = true
     }
 
-    // MARK: 解释 / 追问(会话浮窗)
+    // MARK: 提问 / 追问(上下文提问卡片 → 原地生长为会话浮窗)
 
-    @objc private func onExplainClicked() {
+    @objc private func onAskClicked() {
         guard let text = pendingText else { return }
-        beginConversation(firstUserText: text)
+        let topLeft = panel.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) } ?? NSEvent.mouseLocation
+        showPromptComposer(context: .text(text), anchorTopLeft: topLeft)
     }
 
-    // UI 自测入口(仅 GLINT_UITEST 时调用):程序化冒按钮 → 解释 → 追问,验证整链路 + 截图 + 长高日志。
+    // 截图后将图像编码并暂存于内存,弹出紧凑提问卡片等待用户输入 Prompt
+    func showImagePromptComposer(image: NSImage) {
+        guard let dataURL = RegionCapture.encodeToDataURL(image) else {
+            generation += 1
+            stopConversation()
+            showMessage("图片编码失败,请重试", isError: true)
+            return
+        }
+        let w = savedPopupSize().width
+        let vf = screenFor(point: NSEvent.mouseLocation).visibleFrame
+        let topLeft = NSPoint(x: vf.midX - w / 2, y: vf.maxY - 100)
+        showPromptComposer(context: .image(image, dataURL: dataURL), anchorTopLeft: topLeft)
+    }
+
+    // 展示紧凑提问卡片:顶部上下文角标与关闭按钮 + 中部上下文预览(划选摘要/截图缩略图) + 底部自动聚焦输入框
+    private func showPromptComposer(context: SessionContext, anchorTopLeft: NSPoint) {
+        generation += 1
+        stopConversation()
+        sessionContext = context
+        convo = []
+        isAwaitingInitialPrompt = true
+        panelIsResizable = false
+        lastResult = nil
+        copyButton = nil
+
+        let vf = (panel?.screen ?? screenFor(point: anchorTopLeft)).visibleFrame
+        let w = min(savedPopupSize().width, max(minPopupSize.width, vf.width - kScreenEdgeGap * 2))
+        let boxW = w - convoPad * 2
+        let topBarH: CGFloat = 44
+        let previewBottom: CGFloat = inputBarH + 4
+        let previewTopGap: CGFloat = 4
+
+        let boxH: CGFloat
+        let previewContent: NSView
+        let badgeText: String
+
+        switch context {
+        case .text(let s):
+            badgeText = "已选文本（\(s.count) 字）"
+            let snippet = PromptContextBuilder.previewSnippet(for: s, maxLines: 3, maxChars: 180)
+            let displayText = snippet.isEmpty ? s.trimmingCharacters(in: .whitespacesAndNewlines) : snippet
+            let pStyle = NSMutableParagraphStyle()
+            pStyle.lineSpacing = 3
+            let attr = NSAttributedString(string: displayText, attributes: [
+                .font: NSFont.systemFont(ofSize: 13),
+                .foregroundColor: ClaudeTheme.inkBody,
+                .paragraphStyle: pStyle
+            ])
+            let innerW = max(80, boxW - 24)
+            let measured = measuredTextSize(attr, width: innerW)
+            let h = min(max(ceil(measured.height) + 18, 36), 116)
+            boxH = h
+
+            let tvFrameH = max(18, h - 18)
+            let tv = PreviewSnippetTextView(frame: NSRect(x: 12, y: (h - tvFrameH) / 2, width: innerW, height: tvFrameH))
+            tv.isEditable = false
+            tv.isSelectable = false
+            tv.drawsBackground = false
+            tv.textContainerInset = .zero
+            tv.textContainer?.lineFragmentPadding = 0
+            tv.textContainer?.widthTracksTextView = true
+            tv.isVerticallyResizable = false
+            tv.isHorizontallyResizable = false
+            tv.textStorage?.setAttributedString(attr)
+            previewContent = tv
+
+        case .image(let img, _):
+            badgeText = "已截画面（\(Int(img.size.width)) × \(Int(img.size.height))）"
+            let iw = max(1, img.size.width), ih = max(1, img.size.height)
+            let innerW = max(80, boxW - 20)
+            var dw = min(innerW, iw)
+            var dh = dw * ih / iw
+            let maxImgH: CGFloat = 128
+            if dh > maxImgH { dh = maxImgH; dw = dh * iw / ih }
+            let h = max(56, ceil(dh) + 16)
+            boxH = h
+
+            let iv = NSImageView(frame: NSRect(x: (boxW - dw) / 2, y: (h - dh) / 2, width: dw, height: dh))
+            iv.image = img
+            iv.imageScaling = .scaleProportionallyUpOrDown
+            iv.wantsLayer = true
+            iv.layer?.cornerRadius = 5
+            iv.layer?.masksToBounds = true
+            previewContent = iv
+        }
+
+        let panelH = max(136, previewBottom + boxH + previewTopGap + topBarH)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: panelH))
+        container.autoresizingMask = [.width, .height]
+
+        // 顶部左侧上下文角标与右上角关闭按钮对齐
+        let headerBtnY = panelH - 12 - 28
+        let starLabel = NSTextField(labelWithString: "✦")
+        starLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        starLabel.textColor = ClaudeTheme.terracotta
+        starLabel.sizeToFit()
+        starLabel.frame.origin = NSPoint(x: convoPad, y: headerBtnY + (28 - starLabel.frame.height) / 2)
+        starLabel.autoresizingMask = [.minYMargin]
+        container.addSubview(starLabel)
+
+        let badgeLabel = NSTextField(labelWithString: badgeText)
+        badgeLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
+        badgeLabel.textColor = ClaudeTheme.inkMuted
+        badgeLabel.sizeToFit()
+        badgeLabel.frame.origin = NSPoint(x: starLabel.frame.maxX + 6, y: headerBtnY + (28 - badgeLabel.frame.height) / 2)
+        badgeLabel.autoresizingMask = [.minYMargin]
+        container.addSubview(badgeLabel)
+
+        addTopRightActions(to: container, showCopy: false)
+
+        // 中部内存上下文预览卡片
+        let previewCard = PromptPreviewCardView(frame: NSRect(x: convoPad, y: previewBottom, width: boxW, height: boxH))
+        previewCard.autoresizingMask = [.width, .minYMargin]
+        previewCard.wantsLayer = true
+        previewCard.layer?.masksToBounds = true
+        previewCard.addSubview(previewContent)
+        container.addSubview(previewCard)
+
+        // 底部胶囊输入框(初始清空且置灰发送按钮,输入非空后激活)
+        container.addSubview(makeInputBar(width: w))
+
+        var rect = NSRect(x: anchorTopLeft.x, y: anchorTopLeft.y - panelH, width: w, height: panelH)
+        rect = clampToScreen(rect, anchor: anchorTopLeft)
+        present(content: container, rect: rect, isPill: false)
+        setInputEnabled(true, placeholder: "输入问题或指令，回车发送…")
+        activateAndFocusInput()
+    }
+
+    // UI 自测入口(仅 GLINT_UITEST 时调用):验证划词「翻译 | 提问」胶囊与文本/截图两种紧凑提问卡片态
+    func runDemoPromptContext() {
+        uiTestMode = true
+        let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
+        try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+        let p = NSScreen.main.map { NSPoint(x: $0.frame.midX - 180, y: $0.frame.midY + 240) } ?? NSEvent.mouseLocation
+
+        func failTest(_ msg: String) -> Never {
+            fputs("FAIL: \(msg)\n", stderr)
+            fflush(stderr)
+            exit(1)
+        }
+
+        showButton(text: "func add(_ a: Int, _ b: Int) -> Int { a + b }", fallbackPoint: p)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self = self else { failTest("self released") }
+            self.capturePanel(to: (outDir as NSString).appendingPathComponent("pill_ask.png"))
+            self.onAskClicked()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self = self else { failTest("self released") }
+                guard self.isAwaitingInitialPrompt,
+                      self.convo.isEmpty,
+                      self.askField?.isEnabled == true,
+                      self.sendButton?.isEnabled == false else {
+                    failTest("text prompt card initial state mismatch: awaiting=\(self.isAwaitingInitialPrompt) convo=\(self.convo.count) field=\(String(describing: self.askField?.isEnabled)) send=\(String(describing: self.sendButton?.isEnabled))")
+                }
+                self.onAskSubmit()
+                guard self.isAwaitingInitialPrompt, self.convo.isEmpty else {
+                    failTest("empty submit should not trigger conversation")
+                }
+                self.capturePanel(to: (outDir as NSString).appendingPathComponent("prompt_card_text.png"))
+
+                self.askField?.stringValue = "把这个函数改成泛型写法"
+                self.updateSendButtonState()
+                guard self.sendButton?.isEnabled == true else {
+                    failTest("sendButton should enable for non-empty prompt")
+                }
+
+                guard let rep = NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: 240, pixelsHigh: 140,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+                ) else {
+                    failTest("failed to allocate NSBitmapImageRep")
+                }
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+                NSColor(srgbRed: 0.16, green: 0.18, blue: 0.22, alpha: 1.0).setFill()
+                NSRect(x: 0, y: 0, width: 240, height: 140).fill()
+                ClaudeTheme.terracotta.setFill()
+                NSBezierPath(roundedRect: NSRect(x: 24, y: 40, width: 192, height: 60), xRadius: 8, yRadius: 8).fill()
+                NSGraphicsContext.restoreGraphicsState()
+                let img = NSImage(size: NSSize(width: 240, height: 140))
+                img.addRepresentation(rep)
+
+                self.showImagePromptComposer(image: img)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    guard let self = self else { failTest("self released") }
+                    guard self.isAwaitingInitialPrompt,
+                          self.convo.isEmpty,
+                          self.askField?.isEnabled == true,
+                          self.sendButton?.isEnabled == false else {
+                        failTest("image prompt card initial state mismatch")
+                    }
+                    self.capturePanel(to: (outDir as NSString).appendingPathComponent("prompt_card_image.png"))
+                    print("UITEST prompt_context PASS")
+                    fflush(stdout)
+                    logLine("UITEST prompt_context PASS")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { NSApp.terminate(nil) }
+                }
+            }
+        }
+    }
+
+    // UI 自测入口(仅 GLINT_UITEST=explain 时调用):程序化冒按钮 → 提问卡片 → 填入 Prompt → 追问。
     func runDemoExplain() {
         uiTestMode = true
-        let q = "用中文详细解释 Python 的装饰器(decorator):是什么、@ 语法糖的原理、不带参数和带参数的装饰器分别怎么写、以及 functools.wraps 的作用。请分小节、配多个代码例子。"
+        let q = "def timed(fn):\n    def wrapper(*args, **kwargs):\n        return fn(*args, **kwargs)\n    return wrapper"
         let p = NSScreen.main.map { NSPoint(x: $0.frame.midX - 100, y: $0.frame.midY + 220) } ?? NSEvent.mouseLocation
         showButton(text: q, fallbackPoint: p)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in self?.onExplainClicked() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self = self else { return }
+            self.onAskClicked()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self = self else { return }
+                self.askField?.stringValue = "用中文详细解释这段 Python 装饰器代码，并说明 functools.wraps 的作用。"
+                self.updateSendButtonState()
+                self.onAskSubmit()
+            }
+        }
     }
 
     // Claude UI 视觉回归自测(GLINT_UITEST=claude_ui):
@@ -1200,7 +1467,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         panelIsResizable = true
         userResized = false
         let w = savedPopupSize().width
-        let startH = minPopupSize.height
+        let currentH = panel?.frame.height ?? minPopupSize.height
+        let vf = (panel?.screen ?? screenFor(point: topLeft)).visibleFrame
+        let startH = min(max(currentH, minPopupSize.height), popupHeightCap(vf))
         let textW = w - convoPad * 2
         let container = NSView(frame: NSRect(x: 0, y: 0, width: w, height: startH))
         container.autoresizingMask = [.width, .height]
@@ -1228,6 +1497,8 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         assistantStart = 0
         assistantAccum = ""
         turnStartLoc = 0
+        contextHeaderEndLoc = 0
+        lastErrorLoc = nil
 
         addGrip(to: container)
         var rect = NSRect(x: topLeft.x, y: topLeft.y - startH, width: w, height: startH)
@@ -1278,38 +1549,37 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }, completionHandler: { [weak self] in self?.frameAnimations -= 1 })
     }
 
-    // 建会话浮窗:transcript 滚动区 + 底部追问输入栏(解释时禁用),发起第一轮解释
-    private func beginConversation(firstUserText: String) {
-        generation += 1   // 作废在途的翻译回调(防止快速「翻译→解释」时旧译文污染会话)
-        stopConversation()
-        attachedImageDataURL = nil
-        convo = [(role: "user", content: firstUserText)]
-        let topLeft = panel.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) } ?? NSEvent.mouseLocation
-        installConversationPanel(topLeft: topLeft)
-        sendTurn()
-    }
+    // 会话顶部展示划选文本摘要卡片(暖底圆角块)
+    private func appendContextQuoteCard(_ text: String, to tv: NSTextView) {
+        guard let storage = tv.textStorage else { return }
+        let snippet = PromptContextBuilder.previewSnippet(for: text, maxLines: 4, maxChars: 240)
+        let displayText = snippet.isEmpty ? text.trimmingCharacters(in: .whitespacesAndNewlines) : snippet
 
-    // 截图解释:把图存为会话首条 user(每轮重发),顶部放缩略图 + 指令气泡,然后流式解释。
-    func beginImageConversation(image: NSImage, instruction: String = "请解释这张图片的内容。") {
-        generation += 1
-        stopConversation()
-        guard let dataURL = RegionCapture.encodeToDataURL(image) else {
-            showMessage("图片编码失败,请重试", isError: true)
-            return
-        }
-        attachedImageDataURL = dataURL
-        convo = [(role: "user", content: instruction)]
-        let vf = screenFor(point: NSEvent.mouseLocation).visibleFrame
-        let topLeft = NSPoint(x: vf.midX - savedPopupSize().width / 2, y: vf.maxY - 80)
-        installConversationPanel(topLeft: topLeft)
-        if let tv = convoTextView, let storage = tv.textStorage {
-            storage.append(thumbnailString(image, maxW: savedPopupSize().width - convoPad * 2))
-            storage.append(NSAttributedString(string: instruction + "\n", attributes: [
-                .font: NSFont.systemFont(ofSize: 14.5, weight: .semibold),
-                .foregroundColor: ClaudeTheme.inkStrong,
-                .paragraphStyle: MD.bodyStyle()]))
-        }
-        sendTurn()
+        let p = NSMutableParagraphStyle()
+        p.lineSpacing = 5
+        p.paragraphSpacingBefore = 4
+        p.paragraphSpacing = 12
+        p.firstLineHeadIndent = 14
+        p.headIndent = 14
+        p.tailIndent = -14
+
+        let card = NSMutableAttributedString(string: "✦  划选上下文\u{2028}", attributes: [
+            .font: NSFont.systemFont(ofSize: 11.5, weight: .bold),
+            .foregroundColor: ClaudeTheme.terracotta,
+            .paragraphStyle: p,
+            MD.quoteBlockKey: true
+        ])
+        card.append(NSAttributedString(string: displayText, attributes: [
+            .font: NSFont.systemFont(ofSize: 13),
+            .foregroundColor: ClaudeTheme.inkBody,
+            .paragraphStyle: p,
+            MD.quoteBlockKey: true
+        ]))
+        card.append(NSAttributedString(string: "\n", attributes: [
+            .font: convoFont,
+            .paragraphStyle: MD.bodyStyle()
+        ]))
+        storage.append(card)
     }
 
     // 把图缩放后做成行内附件(贴合浮窗内宽,高度上限 240),返回带尾随换行的富文本
@@ -1412,6 +1682,18 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         capsuleContainer?.isFocused = false
     }
 
+    func controlTextDidChange(_ obj: Notification) {
+        updateSendButtonState()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)), !textView.hasMarkedText() {
+            dismiss()
+            return true
+        }
+        return false
+    }
+
     private func setInputPlaceholder(_ text: String) {
         guard let field = askField else { return }
         field.placeholderAttributedString = NSAttributedString(
@@ -1423,24 +1705,14 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         )
     }
 
-    // 用当前 convo 发起一轮流式;在 transcript 末尾接续 assistant 段
+    // 用当前上下文与 convo 发起一轮流式;不附带任何默认 system prompt
     private func sendTurn() {
+        guard let ctx = sessionContext else { return }
         assistantStart = convoTextView?.textStorage?.length ?? 0
         assistantAccum = ""
         setInputEnabled(false, placeholder: "正在生成…")
         let gen = generation   // 令牌:关窗/换会话(generation+1)后,旧流式回调一律作废,防止污染新会话
-        var messages: [[String: Any]] = [["role": "system", "content": AppConfig.shared.resolvedExplainPrompt]]
-        for (i, m) in convo.enumerated() {
-            if i == 0, m.role == "user", let dataURL = attachedImageDataURL {
-                let content: [[String: Any]] = [
-                    ["type": "text", "text": m.content],
-                    ["type": "image_url", "image_url": ["url": dataURL]]
-                ]
-                messages.append(["role": "user", "content": content])
-            } else {
-                messages.append(["role": m.role, "content": m.content])
-            }
-        }
+        let messages = PromptContextBuilder.buildMessages(context: ctx.payload, turns: convo)
         convoTask = chatStream(messages,
             onDelta: { [weak self] piece in guard let self = self, gen == self.generation else { return }; self.convoAppendDelta(piece) },
             onDone:  { [weak self] full  in guard let self = self, gen == self.generation else { return }; self.finishTurn(full) },
@@ -1461,7 +1733,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         convoTask = nil
         guard convoTextView != nil else { return }   // 会话已被关闭:忽略迟到的完成回调
         let text = full.trimmingCharacters(in: .whitespacesAndNewlines)
-        convo.append((role: "assistant", content: text))
+        convo.append(ConversationTurn(role: "assistant", content: text))
         lastResult = text
         if let tv = convoTextView, let storage = tv.textStorage {
             let len = max(0, storage.length - assistantStart)
@@ -1470,7 +1742,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
         setInputEnabled(true, placeholder: "继续追问… (回车发送)")
         focusAskField()
-        scrollTranscript(toLocation: turnStartLoc)   // 一轮完成后回到本轮开头(从头读)
+        scrollTranscript(toLocation: convo.count <= 2 ? 0 : turnStartLoc)
 
         if uiTestMode {
             let asst = convo.filter { $0.role == "assistant" }.count
@@ -1478,6 +1750,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
                     guard let self = self, let f = self.askField, f.isEnabled else { return }
                     f.stringValue = "为什么带参数的装饰器要写成三层嵌套函数?简短说。"
+                    self.updateSendButtonState()
                     self.onAskSubmit()
                 }
             } else {
@@ -1495,48 +1768,87 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func convoError(_ msg: String) {
         convoTask = nil
         guard convoTextView != nil else { return }   // 会话已被关闭:忽略迟到的错误回调
-        let hasAssistant = convo.contains { $0.role == "assistant" }
-        if !hasAssistant {
-            stopConversation()
-            showMessage(msg, isError: true)
-            return
+        var failedPrompt = ""
+        if convo.last?.role == "user" {
+            failedPrompt = convo.removeLast().content
         }
-        if convo.count > 1, convo.last?.role == "user" { convo.removeLast() }
         if let tv = convoTextView, let storage = tv.textStorage {
-            let len = max(0, storage.length - turnStartLoc)
-            if len > 0 { storage.deleteCharacters(in: NSRange(location: turnStartLoc, length: len)) }
+            let rollbackLoc = convo.isEmpty ? contextHeaderEndLoc : turnStartLoc
+            let len = max(0, storage.length - rollbackLoc)
+            if len > 0 { storage.deleteCharacters(in: NSRange(location: rollbackLoc, length: len)) }
+            lastErrorLoc = storage.length
             storage.append(NSAttributedString(string: "\n⚠️ \(msg)\n", attributes: [
                 .font: convoFont, .foregroundColor: ClaudeTheme.terracotta, .paragraphStyle: MD.bodyStyle()]))
         }
-        setInputEnabled(true, placeholder: "继续追问… (回车发送)")
+        let placeholder = convo.isEmpty ? "输入问题或指令，回车发送…" : "继续追问… (回车发送)"
+        setInputEnabled(true, placeholder: placeholder)
+        if !failedPrompt.isEmpty, (askField?.stringValue.isEmpty ?? true) {
+            askField?.stringValue = failedPrompt
+            updateSendButtonState()
+        }
         focusAskField()
         scrollTranscriptToBottom()
     }
 
-    // 回车或点击右侧 ↑ 按钮发送追问
+    // 回车或点击右侧 ↑ 按钮发送提问或追问
     @objc private func onAskSubmit() {
-        guard let field = askField, field.isEnabled, let tv = convoTextView else { return }
-        let q = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
+        guard inputEnabledState, let field = askField, field.isEnabled, let ctx = sessionContext else { return }
+        let raw = field.stringValue
+        guard PromptContextBuilder.canSubmitPrompt(raw) else { return }
+        let q = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if uiTestMode { logLine("onAskSubmit FIRED q=\(q)") }
+
+        if isAwaitingInitialPrompt {
+            isAwaitingInitialPrompt = false
+            let topLeft = panel.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) } ?? NSEvent.mouseLocation
+            convo = [ConversationTurn(role: "user", content: q)]
+            installConversationPanel(topLeft: topLeft)
+            if let tv = convoTextView, let storage = tv.textStorage {
+                switch ctx {
+                case .text(let s):
+                    appendContextQuoteCard(s, to: tv)
+                case .image(let img, _):
+                    storage.append(thumbnailString(img, maxW: (panel?.frame.width ?? savedPopupSize().width) - convoPad * 2))
+                }
+                contextHeaderEndLoc = storage.length
+                turnStartLoc = contextHeaderEndLoc
+                appendUserBubble(q, label: "你的提问", isFirstTurn: true, to: tv)
+            }
+            sendTurn()
+            return
+        }
+
+        guard let tv = convoTextView, let storage = tv.textStorage else { return }
         field.stringValue = ""
-        turnStartLoc = tv.textStorage?.length ?? 0   // 本轮起点(含追问气泡),失败整轮回滚
-        appendUserBubble(q, to: tv)
-        convo.append((role: "user", content: q))
+        updateSendButtonState()
+        if let errLoc = lastErrorLoc, errLoc <= storage.length {
+            storage.deleteCharacters(in: NSRange(location: errLoc, length: storage.length - errLoc))
+            lastErrorLoc = nil
+        }
+        let isFirstTurn = convo.isEmpty
+        if isFirstTurn {
+            let extra = max(0, storage.length - contextHeaderEndLoc)
+            if extra > 0 { storage.deleteCharacters(in: NSRange(location: contextHeaderEndLoc, length: extra)) }
+            turnStartLoc = contextHeaderEndLoc
+        } else {
+            turnStartLoc = storage.length
+        }
+        appendUserBubble(q, label: isFirstTurn ? "你的提问" : "你的追问", isFirstTurn: isFirstTurn, to: tv)
+        convo.append(ConversationTurn(role: "user", content: q))
         sendTurn()
     }
 
-    // transcript 里追加一条「你的追问」气泡:赤陶色标签 + 浅赤陶暖底
-    private func appendUserBubble(_ q: String, to tv: NSTextView) {
+    // transcript 里追加一条用户提问/追问气泡:赤陶色标签 + 浅赤陶暖底
+    private func appendUserBubble(_ q: String, label: String = "你的追问", isFirstTurn: Bool = false, to tv: NSTextView) {
         guard let storage = tv.textStorage else { return }
         let m = NSMutableAttributedString()
         m.append(NSAttributedString(string: "\n", attributes: [.font: convoFont, .paragraphStyle: MD.bodyStyle()]))
         let pLabel = NSMutableParagraphStyle()
         pLabel.firstLineHeadIndent = 12; pLabel.headIndent = 12; pLabel.tailIndent = -12
         pLabel.lineSpacing = 3
-        pLabel.paragraphSpacingBefore = 24
+        pLabel.paragraphSpacingBefore = isFirstTurn ? 12 : 24
         pLabel.paragraphSpacing = 3
-        m.append(NSAttributedString(string: "你的追问\n", attributes: [
+        m.append(NSAttributedString(string: "\(label)\n", attributes: [
             .font: NSFont.systemFont(ofSize: 11, weight: .bold),
             .foregroundColor: ClaudeTheme.terracotta,
             .paragraphStyle: pLabel, MD.userMsgKey: true]))
@@ -1552,10 +1864,24 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func setInputEnabled(_ enabled: Bool, placeholder: String) {
+        inputEnabledState = enabled
         askField?.isEnabled = enabled
-        sendButton?.isEnabled = enabled
+        updateSendButtonState()
         setInputPlaceholder(placeholder)
         if !enabled { capsuleContainer?.isFocused = false }
+    }
+
+    private func updateSendButtonState() {
+        let canSend = inputEnabledState && PromptContextBuilder.canSubmitPrompt(askField?.stringValue ?? "")
+        sendButton?.isEnabled = canSend
+    }
+
+    private func activateAndFocusInput() {
+        guard let p = panel, let field = askField else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
+        p.makeFirstResponder(field)
+        capsuleContainer?.isFocused = true
     }
 
     // 仅在用户已停留在本浮窗(已是 key window)时才自动聚焦输入框
@@ -1610,7 +1936,11 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         capsuleContainer = nil
         sendButton = nil
         convo = []
-        attachedImageDataURL = nil
+        sessionContext = nil
+        isAwaitingInitialPrompt = false
+        inputEnabledState = false
+        contextHeaderEndLoc = 0
+        lastErrorLoc = nil
         assistantStart = 0
         assistantAccum = ""
     }
@@ -1730,12 +2060,13 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                         styleMask: [.borderless, .nonactivatingPanel, .resizable],
                         backing: .buffered, defer: false)
         p.appearance = NSAppearance(named: .aqua)
-        p.minSize = minPopupSize
+        p.minSize = panelIsResizable ? minPopupSize : minCompactSize
+        p.onCancel = { [weak self] in self?.dismiss() }
         p.delegate = self
         p.isFloatingPanel = true
         p.level = .floating
         p.hidesOnDeactivate = false
-        p.becomesKeyOnlyIfNeeded = true        // 输入框点击才取焦点;翻译/解释浮窗不抢焦点
+        p.becomesKeyOnlyIfNeeded = true        // 输入框点击才取焦点;翻译浮窗不抢焦点
         p.isMovableByWindowBackground = true   // 拖背景空白处即可移动窗口
         p.isOpaque = false
         p.backgroundColor = .clear
@@ -1933,13 +2264,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMainMenu()
 
         // UI 截图自测(不建事件 tap / 不请求权限),便于截屏验证真实渲染:
-        //   GLINT_UITEST=translate → 翻译流程(本地、不走网络)
-        //   GLINT_UITEST=settings  → 设置窗口四 Tab 自检
-        //   其它值 → 解释会话流程(走真实 API)
+        //   GLINT_UITEST=prompt_context → 划词提问 + 截图提问卡片自检(本地、不走网络)
+        //   GLINT_UITEST=translate      → 翻译流程(本地、不走网络)
+        //   GLINT_UITEST=settings       → 设置窗口四 Tab 自检
+        //   其它值 → 提问会话流程(走真实 API)
         if let mode = ProcessInfo.processInfo.environment["GLINT_UITEST"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
                 guard let self = self else { return }
-                if mode == "translate" {
+                if mode == "prompt_context" {
+                    self.popup.runDemoPromptContext()
+                } else if mode == "translate" {
                     self.popup.runDemoTranslate()
                 } else if mode == "claude_ui" {
                     self.popup.runDemoClaudeUI()
@@ -2072,7 +2406,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // 截图解释:无屏幕录制权限先引导,否则弹框选遮罩,截完交给图片会话浮窗
+    // 截图提问:无屏幕录制权限先引导,否则弹框选遮罩,截完交给图片提问卡片
     @objc func onScreenshotExplain() {
         guard AppConfig.shared.active?.vision == true else {
             let a = NSAlert()
@@ -2090,13 +2424,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if granted {
                 // 用户刚在系统弹窗里授权:本进程通常要重开 App 才真正生效
                 a.messageText = "屏幕录制权限已授予"
-                a.informativeText = "权限已开启。首次授予后通常需要重新打开 Glint 才会真正生效,然后再用 ⌃⌥E 截图解释。"
+                a.informativeText = "权限已开启。首次授予后通常需要重新打开 Glint 才会真正生效,然后再用 ⌃⌥E 截图提问。"
                 a.addButton(withTitle: "好的")
                 a.runModal()
             } else {
                 // 之前已被拒绝(系统不再弹窗)或刚拒绝:引导去设置手动打开
                 a.messageText = "需要「屏幕录制」权限"
-                a.informativeText = "截图解释要用到屏幕录制权限。请在 系统设置 → 隐私与安全性 → 屏幕录制 里打开 Glint。\n\n注意:首次授予后通常需要重新打开 Glint 才会生效。"
+                a.informativeText = "截图提问要用到屏幕录制权限。请在 系统设置 → 隐私与安全性 → 屏幕录制 里打开 Glint。\n\n注意:首次授予后通常需要重新打开 Glint 才会生效。"
                 a.addButton(withTitle: "打开设置")
                 a.addButton(withTitle: "取消")
                 if a.runModal() == .alertFirstButtonReturn { openScreenRecordingSettings() }
@@ -2109,7 +2443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rc.capture { [weak self] image in
             self?.activeCapture = nil
             guard let self = self, let image = image else { return }
-            self.popup.beginImageConversation(image: image)
+            self.popup.showImagePromptComposer(image: image)
         }
     }
 

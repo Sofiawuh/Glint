@@ -139,6 +139,7 @@ print("BRAND_LOGO_CONTRACT_OK")
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=30,
             )
             self.assertEqual(
                 compile_proc.returncode,
@@ -151,6 +152,7 @@ print("BRAND_LOGO_CONTRACT_OK")
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=30,
             )
             self.assertEqual(
                 run_proc.returncode,
