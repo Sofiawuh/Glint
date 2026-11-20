@@ -7,6 +7,12 @@
 ```mermaid
 flowchart LR
     EventTap["全局输入层\n(CGEventTap / HotKey)"] --> AppCore["主控与会话浮窗\n(main.swift)"]
+    EventTap --> SelectionRead["选区读取与控件过滤\n(AccessibilitySelectionReader.swift / SelectionDetection.swift)"]
+    EventTap --> KeyboardPolicy["键盘事件分类与复验\n(SelectionEntryKeyboard.swift)"]
+    SelectionRead --> EntryState["微型入口生命周期\n(SelectionEntryLifecycle.swift)"]
+    KeyboardPolicy --> EntryState
+    EntryState --> EntryUI["非激活悬停入口\n(SelectionEntryController.swift / SelectionEntryStyle.swift)"]
+    EntryUI --> AppCore
     AppCore --> Geo["几何定位模块\n(Geometry.swift)"]
     AppCore --> PopupState["浮窗生命周期状态机\n(PopupLifecycle.swift)"]
     AppCore --> MD["块级 Markdown 渲染\n(Markdown.swift)"]
@@ -21,9 +27,11 @@ flowchart LR
     Config --> GPT["Azure OpenAI v1"]
 ```
 
-- **主控与会话浮窗**（[glint-app/main.swift](../../glint-app/main.swift)）：负责应用生命周期（`AppDelegate`）、全局鼠标划词监听（`CGEventTap`）、AX/剪贴板取词、翻译与流式对话网络请求（`translate` / `chatStream`）以及毛玻璃浮窗控制器（`PopupController`，管理紧凑提问卡片、内存上下文暂存与流式会话展开）。
+- **主控与会话浮窗**（[glint-app/main.swift](../../glint-app/main.swift)）：负责应用生命周期（`AppDelegate`）、全局鼠标/键盘监听（`CGEventTap`）、翻译与流式对话网络请求（`translate` / `chatStream`）以及内容浮窗控制器（`PopupController`，管理紧凑提问卡片、内存上下文暂存与流式会话展开）。
+- **文本选区检测**（[glint-app/SelectionDetection.swift](../../glint-app/SelectionDetection.swift)、[glint-app/AccessibilitySelectionReader.swift](../../glint-app/AccessibilitySelectionReader.swift)）：鼠标释放、双击/三击、键盘扩选与 `⌘A` 后读取 AX 文本、范围和边界，通过 `SelectionObservationTracker` 对比稳定选区并使晚到观察失效；只有非空、非零、确实变化的文本选区才被接受。滚动条、Slider、Splitter、列/行头和调整柄直接排除，且不得进入剪贴板复制降级。
+- **选区微型入口**（[glint-app/SelectionEntryLifecycle.swift](../../glint-app/SelectionEntryLifecycle.swift)、[glint-app/SelectionEntryKeyboard.swift](../../glint-app/SelectionEntryKeyboard.swift)、[glint-app/SelectionEntryStyle.swift](../../glint-app/SelectionEntryStyle.swift)、[glint-app/SelectionEntryController.swift](../../glint-app/SelectionEntryController.swift)）：以独立可测试状态机管理 marker、悬停等待、展开和收回；marker 为附着于选区右下角的 10×10 pt 赤陶色方块，使用 22×22 pt 透明命中区；键盘策略区分内部模拟复制、Escape、扩选、全选和普通用户按键；专用 non-activating `NSPanel` 不激活 Glint，点击动作后才把不可变选区快照交给 `PopupController`。
 - **浮窗生命周期状态机**（[glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)）：独立描述内容窗的 `visible`、`hiddenRestorable`、`dismissed` 状态，以及图钉、外部点击、菜单恢复和新划词替换规则；配套黑盒状态转换测试位于 [glint-app/popup_lifecycle_tests.swift](../../glint-app/popup_lifecycle_tests.swift)。
-- **几何定位模块**（[glint-app/Geometry.swift](../../glint-app/Geometry.swift)）：纯几何函数层，负责计算划词气泡与浮窗在屏幕可视区内的落点矩形与边界夹紧，不直接耦合 `NSScreen`/`NSEvent`，配套单测位于 [glint-app/geometry_tests.swift](../../glint-app/geometry_tests.swift)。
+- **几何定位模块**（[glint-app/Geometry.swift](../../glint-app/Geometry.swift)）：纯几何函数层，负责 Quartz/AppKit 坐标转换、选区右下角微型入口、展开胶囊、连续悬停命中区域和内容浮窗边界夹紧，不直接耦合 `NSScreen`/`NSEvent`，配套单测位于 [glint-app/geometry_tests.swift](../../glint-app/geometry_tests.swift)。
 - **块级 Markdown 渲染**（[glint-app/Markdown.swift](../../glint-app/Markdown.swift)）：将模型输出的 Markdown（标题、多级列表、GFM 表格、代码块、行内样式）解析为 AppKit `NSAttributedString`，并通过 `CodeBlockLayoutManager` 绘制代码块圆角底色，配套单测位于 [glint-app/markdown_tests.swift](../../glint-app/markdown_tests.swift)。
 - **框选截图模块**（[glint-app/Screenshot.swift](../../glint-app/Screenshot.swift)）：提供全屏遮罩框选（`RegionCapture`）、遮罩下层真实画面截取（`CGWindowListCreateImage`）及 PNG Base64 Data URL 编码。
 - **快捷键录制与切换事务**（[glint-app/ScreenshotHotKey.swift](../../glint-app/ScreenshotHotKey.swift)、[glint-app/HotKey.swift](../../glint-app/HotKey.swift)、[glint-app/HotKeyRecorderControl.swift](../../glint-app/HotKeyRecorderControl.swift)）：保存标准化键码和修饰键，基础设置页直接录制组合键；候选 Carbon 热键先注册为未激活，只有配置保存与旧键注销全部成功后才启用，失败时保留原快捷键。
@@ -37,19 +45,25 @@ flowchart LR
 sequenceDiagram
     participant User as 用户鼠标/热键
     participant Tap as CGEventTap / HotKey
-    participant Extractor as AX / Pasteboard / Screenshot
+    participant Selection as AX 选区读取 / 控件过滤
+    participant Entry as 微型悬停入口
+    participant Extractor as Pasteboard / Screenshot
     participant Geo as Geometry 定位计算
     participant Popup as PopupController 浮窗
     participant Builder as PromptContextBuilder
     participant Translator as Azure Translator
     participant GPT as Azure OpenAI v1
 
-    User->>Tap: 拖拽划词释放 或 按下截图快捷键(默认 ⌃⌥E)
-    Tap->>Extractor: 读取选中文本 / 截取选区画面并编码 Data URL
-    Extractor-->>Popup: 返回文本或图像（暂存于内存，不自动发请求）
-    Popup->>Geo: 计算光标右下角/屏幕居中矩形并夹紧可视区
-    Geo-->>Popup: 返回 NSRect
-    Popup-->>User: 划词显示「翻译 | 提问」胶囊；点击「提问」或完成截图后弹出紧凑提问卡片
+    User->>Tap: 鼠标或键盘完成文本选择 或 按下截图快捷键(默认 ⌃⌥E)
+    Tap->>Selection: 读取 AX 选区、对比稳定快照并检查鼠标命中角色链
+    Selection-->>Entry: 返回有效 SelectionSnapshot（无效/控件拖动静默忽略）
+    Entry->>Geo: 计算选区右下角 marker、展开胶囊和连续命中区域
+    Geo-->>Entry: 返回 SelectionEntryLayout
+    Entry-->>User: 先显示微型入口；明确移入并悬停 180ms 后展开「翻译 | 提问」
+    Entry-->>Popup: 点击动作后关闭入口并提交不可变文本快照
+    Tap->>Extractor: 截图时截取选区画面并编码 Data URL
+    Extractor-->>Popup: 返回图像（暂存于内存，不自动发请求）
+    Popup-->>User: 点击「提问」或完成截图后弹出紧凑提问卡片
     alt 点击「翻译」
         Popup->>Translator: 自动选择 en / zh-Hans 目标语言并发起翻译
         Translator-->>Popup: 返回译文并自适应尺寸显示
@@ -71,9 +85,11 @@ sequenceDiagram
 
 ## 3. 系统不变量与边界约束
 
-- **事件 Tap 零阻塞与自愈约束**（[glint-app/main.swift](../../glint-app/main.swift)）：`CGEventTap` 回调严禁同步休眠或耗时阻塞；取词必须派发至后台队列且由 `gFetchInFlight` 互斥串行化，防止剪贴板快照恢复竞态；遇到 `.tapDisabledByTimeout` 必须立即自愈重开。
+- **事件 Tap 零阻塞、代际作废与自愈约束**（[glint-app/main.swift](../../glint-app/main.swift)）：`CGEventTap` 回调严禁同步休眠或耗时阻塞；取词派发至专用串行后台队列以保护剪贴板快照恢复，每次新鼠标按下、用户键盘输入或前台应用切换都会使旧读取令牌失效，晚到结果不得复活旧入口；Glint 内部模拟 `⌘C` 必须携带专用来源标记并跳过自身失效逻辑；遇到 `.tapDisabledByTimeout` 必须立即自愈重开。
+- **选区证据与控件过滤约束**（[glint-app/SelectionDetection.swift](../../glint-app/SelectionDetection.swift)）：鼠标位移不是触发门槛，零位移释放、双击/三击和键盘操作均必须在 AX 证明形成新的非空、非零选区时才触发。任一按下/释放角色祖先属于滚动条、滑块、分隔条、列/行头或调整柄时都必须静默忽略，并禁止模拟 `⌘C`。剪贴板降级即使复制到非空文本，也必须另有 AX 范围或边界变化证据，否则 fail-closed。
+- **入口不抢焦点、来源复验与悬停代际约束**（[glint-app/SelectionEntryLifecycle.swift](../../glint-app/SelectionEntryLifecycle.swift)、[glint-app/SelectionEntryKeyboard.swift](../../glint-app/SelectionEntryKeyboard.swift)、[glint-app/SelectionEntryController.swift](../../glint-app/SelectionEntryController.swift)）：入口展示不得调用 `NSApp.activate` 或 `makeKeyAndOrderFront`；初次出现时必须观察到鼠标先在入口外、再明确进入，才可启动 `180 ms` 展开计时。所有延迟回调必须携带代际令牌或绑定原始快照，旧选区不得展开、收回或关闭新入口；前台应用或焦点元素身份变化、外部点击和 Escape 立即使入口失效，其他用户按键在短延迟复验后仅于来源或选区确实变化时关闭。
 - **截图快捷键事务约束**（[glint-app/HotKey.swift](../../glint-app/HotKey.swift)）：候选快捷键在保存前必须保持未激活；注册、保存或旧键注销任一失败时，原快捷键继续执行截图。录制期间按当前快捷键只回填录制器，不触发截图。
 - **异步会话代际隔离约束**（[glint-app/main.swift](../../glint-app/main.swift)）：每次关闭浮窗、触发新划词或切换「翻译/解释」时，`generation` 令牌必须递增，所有在途的非流式/流式网络回调若 `gen != self.generation` 必须立即丢弃，严禁污染新浮窗。
 - **窗口帧动画与尺寸记忆约束**（[glint-app/main.swift](../../glint-app/main.swift)）：`frameAnimations > 0` 期间严禁触发 `growToFit()` 或响应 macOS 假 `windowDidEndLiveResize` 回调，防止将动画中间态尺寸写入 `UserDefaults` 或中断自动长高。
-- **单窗口恢复与明确销毁约束**（[glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)、[glint-app/main.swift](../../glint-app/main.swift)）：未钉住的展开内容窗与紧凑提问卡片在外部点击时只能隐藏，并保留同一窗口、隐藏前位置尺寸、内存上下文及未发送草稿；紧凑提问卡片不可钉住，钉住的展开内容窗不得被外部点击或新划词替换；只有 `×`、Escape、新会话替换或退出应用可以销毁对应上下文。快捷划词胶囊不进入可恢复状态。
+- **单窗口恢复与明确销毁约束**（[glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)、[glint-app/main.swift](../../glint-app/main.swift)）：未钉住的展开内容窗与紧凑提问卡片在外部点击时只能隐藏，并保留同一窗口、隐藏前位置尺寸、内存上下文及未发送草稿；紧凑提问卡片不可钉住，钉住的展开内容窗不得被外部点击或新划词替换；只有 `×`、Escape、新会话替换或退出应用可以销毁对应上下文。选区微型入口独立存在，不进入内容窗恢复状态。
 - **多屏坐标系翻转基准与分屏独立遮罩约束**（[glint-app/main.swift](../../glint-app/main.swift)、[glint-app/Screenshot.swift](../../glint-app/Screenshot.swift)）：Quartz（左上原点）与 AppKit（左下原点）之间的 Y 轴翻转必须以原点 `(0,0)` 所在主屏高度 `primaryScreenHeight()` 为基准，严禁使用 `NSScreen.main`（焦点屏）或多屏并集高度；框选截图（`RegionCapture`）必须为 `NSScreen.screens` 中的每块显示器分别创建独立的 `CaptureWindow` 并重写 `constrainFrameRect(_:to:)`，规避 macOS「显示器具有单独的空间」对单窗口跨屏的裁切与 `visibleFrame` 收缩。

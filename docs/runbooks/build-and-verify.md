@@ -10,6 +10,18 @@
 # 几何定位测试
 harness run geometry-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/geo_test" glint-app/Geometry.swift glint-app/geometry_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/geo_test"'
 
+# 文本选区证据与控件拖动过滤
+harness run selection-detection-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_detection_test" glint-app/SelectionDetection.swift glint-app/selection_detection_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_detection_test"'
+
+# 微型入口悬停、展开、收回和代际令牌状态机
+harness run selection-entry-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_entry_lifecycle_test" glint-app/SelectionDetection.swift glint-app/SelectionEntryLifecycle.swift glint-app/selection_entry_lifecycle_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_entry_lifecycle_test"'
+
+# 10×10 pt 赤陶色方块、22×22 pt 命中区、描边与阴影样式契约
+harness run selection-entry-style-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/selection_entry_style_test" glint-app/SelectionEntryStyle.swift glint-app/selection_entry_style_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/selection_entry_style_test"'
+
+# 内部模拟复制、Escape 与普通用户按键复验策略
+harness run selection-entry-keyboard-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_entry_keyboard_test" glint-app/SelectionDetection.swift glint-app/SelectionEntryLifecycle.swift glint-app/SelectionEntryKeyboard.swift glint-app/selection_entry_keyboard_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_entry_keyboard_test"'
+
 # Markdown 渲染测试
 harness run markdown-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/md_test" glint-app/Markdown.swift glint-app/markdown_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/md_test"'
 
@@ -52,6 +64,7 @@ open /Applications/Glint.app
   GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_UITEST=hotkey_settings GLINT_UITEST_DIR=/tmp/glint-hotkey-settings /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_UITEST=pin_restore GLINT_UITEST_DIR=/tmp/glint-pin-restore /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_UITEST=selection_entry GLINT_UITEST_DIR=/tmp/glint-selection-entry /Applications/Glint.app/Contents/MacOS/Glint
   ```
 - **运行状态与日志核查**：
   - 检查进程存活：`pgrep -fl /Applications/Glint.app/Contents/MacOS/Glint`
