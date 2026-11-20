@@ -22,7 +22,7 @@ else
 fi
 
 echo "==> 1/5 编译 universal 二进制 (arm64 + x86_64) 与生成品牌图标 (Glint.icns)"
-SRCS="main.swift Geometry.swift Markdown.swift Screenshot.swift Config.swift Settings.swift BrandLogo.swift"
+SRCS="main.swift Geometry.swift Markdown.swift Screenshot.swift Config.swift Settings.swift BrandLogo.swift PopupLifecycle.swift"
 swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 lipo -create -output /tmp/glint_uni /tmp/glint_arm64 /tmp/glint_x86

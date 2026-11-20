@@ -8,6 +8,7 @@
 flowchart LR
     EventTap["全局输入层\n(CGEventTap / HotKey)"] --> AppCore["主控与会话浮窗\n(main.swift)"]
     AppCore --> Geo["几何定位模块\n(Geometry.swift)"]
+    AppCore --> PopupState["浮窗生命周期状态机\n(PopupLifecycle.swift)"]
     AppCore --> MD["块级 Markdown 渲染\n(Markdown.swift)"]
     AppCore --> Capture["框选截图模块\n(Screenshot.swift)"]
     AppCore --> SettingsUI["Azure 设置与连接探测\n(Settings.swift)"]
@@ -19,6 +20,7 @@ flowchart LR
 ```
 
 - **主控与会话浮窗**（[glint-app/main.swift](../../glint-app/main.swift)）：负责应用生命周期（`AppDelegate`）、全局鼠标划词监听（`CGEventTap`）、AX/剪贴板取词、翻译与流式对话网络请求（`translate` / `chatStream`）以及毛玻璃浮窗控制器（`PopupController`，管理紧凑提问卡片、内存上下文暂存与流式会话展开）。
+- **浮窗生命周期状态机**（[glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)）：独立描述内容窗的 `visible`、`hiddenRestorable`、`dismissed` 状态，以及图钉、外部点击、菜单恢复和新划词替换规则；配套黑盒状态转换测试位于 [glint-app/popup_lifecycle_tests.swift](../../glint-app/popup_lifecycle_tests.swift)。
 - **几何定位模块**（[glint-app/Geometry.swift](../../glint-app/Geometry.swift)）：纯几何函数层，负责计算划词气泡与浮窗在屏幕可视区内的落点矩形与边界夹紧，不直接耦合 `NSScreen`/`NSEvent`，配套单测位于 [glint-app/geometry_tests.swift](../../glint-app/geometry_tests.swift)。
 - **块级 Markdown 渲染**（[glint-app/Markdown.swift](../../glint-app/Markdown.swift)）：将模型输出的 Markdown（标题、多级列表、GFM 表格、代码块、行内样式）解析为 AppKit `NSAttributedString`，并通过 `CodeBlockLayoutManager` 绘制代码块圆角底色，配套单测位于 [glint-app/markdown_tests.swift](../../glint-app/markdown_tests.swift)。
 - **框选截图模块**（[glint-app/Screenshot.swift](../../glint-app/Screenshot.swift)）：提供全屏遮罩框选（`RegionCapture`）、遮罩下层真实画面截取（`CGWindowListCreateImage`）及 PNG Base64 Data URL 编码。
@@ -61,10 +63,12 @@ sequenceDiagram
 - **关键数据结构**：
   - `AzureTranslatorConfig`、`AzureOpenAIConfig`、`AppConfig`、`PromptContextPayload`、`ConversationTurn` 与 `PromptContextBuilder`（定义于 [glint-app/Config.swift](../../glint-app/Config.swift)）：描述 Azure 双服务配置、请求与响应契约，以及文本/图像上下文与用户 Prompt 的消息组装。
   - `PopupController` 会话状态（定义于 [glint-app/main.swift](../../glint-app/main.swift)）：维护内存上下文 `sessionContext`、`convo` 对话轮次、`isAwaitingInitialPrompt` 提问卡片状态以及 `generation` 异步回调作废令牌。
+  - `PopupLifecycle`（定义于 [glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)）：维护当前窗口呈现状态、是否可恢复及是否钉住，不持久化任何会话内容。
 
 ## 3. 系统不变量与边界约束
 
 - **事件 Tap 零阻塞与自愈约束**（[glint-app/main.swift](../../glint-app/main.swift)）：`CGEventTap` 回调严禁同步休眠或耗时阻塞；取词必须派发至后台队列且由 `gFetchInFlight` 互斥串行化，防止剪贴板快照恢复竞态；遇到 `.tapDisabledByTimeout` 必须立即自愈重开。
 - **异步会话代际隔离约束**（[glint-app/main.swift](../../glint-app/main.swift)）：每次关闭浮窗、触发新划词或切换「翻译/解释」时，`generation` 令牌必须递增，所有在途的非流式/流式网络回调若 `gen != self.generation` 必须立即丢弃，严禁污染新浮窗。
 - **窗口帧动画与尺寸记忆约束**（[glint-app/main.swift](../../glint-app/main.swift)）：`frameAnimations > 0` 期间严禁触发 `growToFit()` 或响应 macOS 假 `windowDidEndLiveResize` 回调，防止将动画中间态尺寸写入 `UserDefaults` 或中断自动长高。
+- **单窗口恢复与明确销毁约束**（[glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)、[glint-app/main.swift](../../glint-app/main.swift)）：未钉住的展开内容窗与紧凑提问卡片在外部点击时只能隐藏，并保留同一窗口、隐藏前位置尺寸、内存上下文及未发送草稿；紧凑提问卡片不可钉住，钉住的展开内容窗不得被外部点击或新划词替换；只有 `×`、Escape、新会话替换或退出应用可以销毁对应上下文。快捷划词胶囊不进入可恢复状态。
 - **多屏坐标系翻转基准与分屏独立遮罩约束**（[glint-app/main.swift](../../glint-app/main.swift)、[glint-app/Screenshot.swift](../../glint-app/Screenshot.swift)）：Quartz（左上原点）与 AppKit（左下原点）之间的 Y 轴翻转必须以原点 `(0,0)` 所在主屏高度 `primaryScreenHeight()` 为基准，严禁使用 `NSScreen.main`（焦点屏）或多屏并集高度；框选截图（`RegionCapture`）必须为 `NSScreen.screens` 中的每块显示器分别创建独立的 `CaptureWindow` 并重写 `constrainFrameRect(_:to:)`，规避 macOS「显示器具有单独的空间」对单窗口跨屏的裁切与 `visibleFrame` 收缩。
