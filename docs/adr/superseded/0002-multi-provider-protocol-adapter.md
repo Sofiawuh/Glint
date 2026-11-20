@@ -1,6 +1,6 @@
 # ADR-0002: 多协议适配层（OpenAI / Anthropic / Gemini Compatible）与官方四厂商直选
 
-- **状态 (Status)**：Accepted
+- **状态 (Status)**：Superseded by [ADR-0003](../0003-azure-only-services.md)
 - **日期 (Date)**：2026-10-26
 
 ## 1. 背景与上下文 (Context)
@@ -41,4 +41,8 @@
   - 翻译（非流式）、解释与多轮追问（SSE 流式）、截图看图（多模态 Base64 图片）三大核心能力在 OpenAI、Anthropic、Gemini 三套协议下完全打通。
   - 既有用户的 `~/.config/glint/config.json` 零损升级，无需重新输入已有的 DeepSeek / MiMo Key。
 - **边界约束**：
-  - `Config.swift` 保持纯 `Foundation` 依赖，便于通过 [glint-app/provider_tests.swift](../../glint-app/provider_tests.swift) 独立编译执行黑盒协议单测。
+  - `Config.swift` 保持纯 `Foundation` 依赖，便于通过当时的 `glint-app/provider_tests.swift` 独立编译执行黑盒协议单测。
+
+## 4. 失效说明
+
+个人 Fork 已明确收缩为 Azure 专用客户端，多厂商选择、兼容协议与旧配置迁移不再属于当前产品范围。本决策由 [ADR-0003](../0003-azure-only-services.md) 取代并归档。

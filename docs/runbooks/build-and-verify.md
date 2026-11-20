@@ -2,7 +2,7 @@
 
 本手册规范 [glint-app/](../../glint-app) 的本地编译、签名校验、安装替换与自验收流程。
 
-## 1. 几何、Markdown 与多协议适配单测验收
+## 1. 几何、Markdown 与 Azure 协议单测验收
 
 通过 `yoryon-harness run` 在隔离沙盒中编译并执行测试：
 
@@ -13,8 +13,11 @@ yoryon-harness run geometry-tests -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/geo_t
 # Markdown 渲染测试
 yoryon-harness run markdown-tests -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/md_test" glint-app/Markdown.swift glint-app/markdown_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/md_test"'
 
-# 多协议与多厂商适配测试
-yoryon-harness run provider-tests -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/prov_test" glint-app/Config.swift glint-app/provider_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/prov_test"'
+# Azure Translator / Azure OpenAI v1 适配测试
+yoryon-harness run azure-services-tests -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/azure_test" glint-app/Config.swift glint-app/azure_services_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/azure_test"'
+
+# 结果窗口图钉 / 隐藏 / 恢复生命周期测试
+yoryon-harness run popup-lifecycle-tests -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/popup_test" glint-app/PopupLifecycle.swift glint-app/popup_lifecycle_tests.swift && "$HARNESS_WORK_DIR/popup_test"'
 ```
 
 ## 2. 应用打包与安装替换
@@ -38,6 +41,7 @@ open /Applications/Glint.app
 - **本地 UI 自测（无需联网）**：
   ```bash
   GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_UITEST=pin_restore GLINT_UITEST_DIR=/tmp/glint-pin-restore /Applications/Glint.app/Contents/MacOS/Glint
   ```
 - **运行状态与日志核查**：
   - 检查进程存活：`pgrep -fl /Applications/Glint.app/Contents/MacOS/Glint`

@@ -10,6 +10,7 @@ cd "$HERE"
 APP="Glint.app"
 BUNDLE_ID="com.yoryon.glint"
 MIN_OS="12.0"
+RUNTIME_COMPAT_FLAGS="-runtime-compatibility-version none -disable-autolinking-runtime-compatibility"
 
 # 选签名身份:命令行指定 > 固定自签名证书(更新不丢权限)> adhoc
 if [ -n "$1" ]; then
@@ -21,9 +22,9 @@ else
 fi
 
 echo "==> 1/5 编译 universal 二进制 (arm64 + x86_64) 与生成品牌图标 (Glint.icns)"
-SRCS="main.swift Geometry.swift Markdown.swift Screenshot.swift Config.swift Settings.swift BrandLogo.swift"
-swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O
-swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O
+SRCS="main.swift Geometry.swift Markdown.swift Screenshot.swift Config.swift Settings.swift BrandLogo.swift PopupLifecycle.swift"
+swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
+swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 lipo -create -output /tmp/glint_uni /tmp/glint_arm64 /tmp/glint_x86
 echo "    架构: $(lipo -archs /tmp/glint_uni)"
 
@@ -84,9 +85,10 @@ Glint 划词翻译 / 划词提问 / 截图提问 —— 安装 3 步
    系统设置 → 隐私与安全性 → 辅助功能 → 把 Glint 的开关打开。
    (这是划词监听必需的权限,不开就不会冒泡。)
 
-填 API Key(图形界面,无需命令行):
-   点菜单栏 Glint 图标 →「设置…」→「服务商」,里面预置了 DeepSeek、Gemini、Vertex AI、MiMo 四大服务商。
-   在想用的那个里填上 API Key、点保存即可。
+配置 Azure(图形界面,无需命令行):
+   点菜单栏 Glint 图标 →「设置…」→「Azure」。
+   Azure Text Translation 填 Endpoint、API Key、Region；Azure GPT 填 /openai/v1 Endpoint、API Key、Deployment Name。
+   两组配置都可以先点「测试连接」验证当前输入，再点「保存」。
 
 用法:
  - 划词:任意 App 里选中一段文字 → 光标右下角冒出「翻译」「提问」:

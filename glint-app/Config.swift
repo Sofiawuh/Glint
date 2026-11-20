@@ -50,6 +50,208 @@ enum StreamEvent: Equatable {
     case error(String)
 }
 
+private enum AzureErrorFormatter {
+    static func sanitized(_ value: String, secrets: [String]) -> String {
+        var result = value
+        for secret in secrets {
+            let clean = secret.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !clean.isEmpty {
+                result = result.replacingOccurrences(of: clean, with: "[已隐藏]", options: [.caseInsensitive])
+            }
+        }
+        return result
+    }
+
+    static func message(statusCode: Int, data: Data?, service: String, secrets: [String]) -> String {
+        if let data,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let error = json["error"] as? [String: Any] {
+            let code: String
+            if let stringCode = error["code"] as? String {
+                code = stringCode
+            } else if let numberCode = error["code"] as? NSNumber {
+                code = numberCode.stringValue
+            } else {
+                code = "HTTP \(statusCode)"
+            }
+            let detail = error["message"] as? String ?? "请求失败"
+            return sanitized("\(service) 出错（\(code)）：\(detail)", secrets: secrets)
+        }
+        return "\(service) 出错（HTTP \(statusCode)），请检查 Endpoint、Key、区域或服务状态"
+    }
+}
+
+struct AzureTranslatorConfig: Codable, Equatable {
+    var endpoint: String
+    var apiKey: String
+    var region: String
+
+    init(endpoint: String = "https://api.cognitive.microsofttranslator.com", apiKey: String = "", region: String = "") {
+        self.endpoint = endpoint
+        self.apiKey = apiKey
+        self.region = region
+    }
+
+    static func targetLanguage(for text: String) -> String {
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x3400...0x4DBF, 0x4E00...0x9FFF, 0xF900...0xFAFF, 0x20000...0x2FA1F:
+                return "en"
+            default:
+                continue
+            }
+        }
+        return "zh-Hans"
+    }
+
+    private func translateURL(target: String) -> URL? {
+        var base = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        if !base.hasSuffix("/translate") { base += "/translate" }
+        guard var components = URLComponents(string: base),
+              components.scheme?.lowercased() == "https",
+              components.host != nil else { return nil }
+        components.queryItems = [
+            URLQueryItem(name: "api-version", value: "3.0"),
+            URLQueryItem(name: "to", value: target)
+        ]
+        return components.url
+    }
+
+    func buildRequest(text: String) -> URLRequest? {
+        let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKey.isEmpty,
+              let url = translateURL(target: Self.targetLanguage(for: text)) else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cleanKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
+        let cleanRegion = region.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanRegion.isEmpty {
+            request.setValue(cleanRegion, forHTTPHeaderField: "Ocp-Apim-Subscription-Region")
+        }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [["Text": text]])
+        return request
+    }
+
+    func buildProbeRequest() -> URLRequest? {
+        buildRequest(text: "test")
+    }
+
+    func parseResponse(data: Data) -> String? {
+        guard let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let first = items.first,
+              let translations = first["translations"] as? [[String: Any]],
+              let text = translations.first?["text"] as? String,
+              !text.isEmpty else { return nil }
+        return text
+    }
+
+    func parseError(statusCode: Int, data: Data?) -> String {
+        AzureErrorFormatter.message(
+            statusCode: statusCode,
+            data: data,
+            service: "Azure Translator",
+            secrets: [apiKey]
+        )
+    }
+}
+
+struct AzureOpenAIConfig: Codable, Equatable {
+    var endpoint: String
+    var apiKey: String
+    var deploymentName: String
+    var supportsVision: Bool
+
+    init(endpoint: String = "", apiKey: String = "", deploymentName: String = "", supportsVision: Bool = false) {
+        self.endpoint = endpoint
+        self.apiKey = apiKey
+        self.deploymentName = deploymentName
+        self.supportsVision = supportsVision
+    }
+
+    private var chatCompletionsURL: URL? {
+        var base = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        while base.hasSuffix("/") { base.removeLast() }
+        if !base.hasSuffix("/chat/completions") { base += "/chat/completions" }
+        guard let url = URL(string: base),
+              url.scheme?.lowercased() == "https",
+              url.host != nil else { return nil }
+        return url
+    }
+
+    func buildRequest(
+        messages: [[String: Any]],
+        maxTokens: Int,
+        stream: Bool
+    ) -> URLRequest? {
+        let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanDeployment = deploymentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKey.isEmpty, !cleanDeployment.isEmpty, let url = chatCompletionsURL else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = stream ? 60 : 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(cleanKey, forHTTPHeaderField: "api-key")
+        if stream { request.setValue("text/event-stream", forHTTPHeaderField: "Accept") }
+        let body: [String: Any] = [
+            "model": cleanDeployment,
+            "messages": messages,
+            "max_completion_tokens": maxTokens,
+            "stream": stream
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        return request
+    }
+
+    func buildProbeRequest() -> URLRequest? {
+        buildRequest(
+            messages: [["role": "user", "content": "Reply with OK."]],
+            maxTokens: 8,
+            stream: false
+        )
+    }
+
+    func parseResponse(data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String,
+              !content.isEmpty else { return nil }
+        return content
+    }
+
+    func parseStreamLine(_ line: String) -> StreamEvent {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.hasPrefix(":") || trimmed.hasPrefix("event:") { return .ignore }
+        guard trimmed.hasPrefix("data:") else { return .ignore }
+        let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
+        if payload == "[DONE]" { return .done }
+        guard let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .ignore }
+        if let error = json["error"] as? [String: Any] {
+            let code = error["code"] as? String ?? "stream_error"
+            let detail = error["message"] as? String ?? "流式请求失败"
+            return .error(AzureErrorFormatter.sanitized("\(code)：\(detail)", secrets: [apiKey]))
+        }
+        guard let choices = json["choices"] as? [[String: Any]],
+              let delta = choices.first?["delta"] as? [String: Any],
+              let content = delta["content"] as? String,
+              !content.isEmpty else { return .ignore }
+        return .delta(content)
+    }
+
+    func parseError(statusCode: Int, data: Data?) -> String {
+        AzureErrorFormatter.message(
+            statusCode: statusCode,
+            data: data,
+            service: "Azure GPT",
+            secrets: [apiKey]
+        )
+    }
+}
+
 struct Provider: Codable, Equatable {
     var name: String
     var format: APIFormat
@@ -417,8 +619,8 @@ struct SupportedLanguage: Equatable {
     let displayName: String
 }
 
-final class AppConfig {
-    static let shared = AppConfig()
+final class LegacyAppConfig {
+    static let shared = LegacyAppConfig()
     static let languagePlaceholder = "<languages>"
     static let defaultLanguage = "Simplified Chinese"
 
@@ -445,12 +647,12 @@ final class AppConfig {
 
     private(set) var providers: [Provider] = []
     private(set) var activeName: String = ""
-    private(set) var language: String = AppConfig.defaultLanguage
-    private(set) var translatePrompt: String = AppConfig.defaultTranslatePrompt
+    private(set) var language: String = LegacyAppConfig.defaultLanguage
+    private(set) var translatePrompt: String = LegacyAppConfig.defaultTranslatePrompt
     private var path: String { kConfigDir + "/config.json" }
 
     var resolvedTranslatePrompt: String {
-        AppConfig.resolvePrompt(translatePrompt, language: language)
+        LegacyAppConfig.resolvePrompt(translatePrompt, language: language)
     }
 
     // 当前厂商:按名字找;找不到回退第一条(永不为 nil,只要至少一条)
@@ -541,22 +743,22 @@ final class AppConfig {
         if let data = fm.contents(atPath: path),
            let stored = try? JSONDecoder().decode(Stored.self, from: data),
            !stored.providers.isEmpty {
-            let merged = AppConfig.mergeOfficialPresets(into: stored.providers)
+            let merged = LegacyAppConfig.mergeOfficialPresets(into: stored.providers)
             providers = merged
             activeName = stored.active
             let rawLang = stored.language?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            language = rawLang.isEmpty ? AppConfig.defaultLanguage : rawLang
+            language = rawLang.isEmpty ? LegacyAppConfig.defaultLanguage : rawLang
             let rawTrans = stored.translatePrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            translatePrompt = rawTrans.isEmpty ? AppConfig.defaultTranslatePrompt : (stored.translatePrompt ?? AppConfig.defaultTranslatePrompt)
+            translatePrompt = rawTrans.isEmpty ? LegacyAppConfig.defaultTranslatePrompt : (stored.translatePrompt ?? LegacyAppConfig.defaultTranslatePrompt)
             if merged != stored.providers || stored.language == nil || stored.translatePrompt == nil {
                 save()
             }
             return
         }
-        providers = AppConfig.presets()
+        providers = LegacyAppConfig.presets()
         activeName = "MiMo"
-        language = AppConfig.defaultLanguage
-        translatePrompt = AppConfig.defaultTranslatePrompt
+        language = LegacyAppConfig.defaultLanguage
+        translatePrompt = LegacyAppConfig.defaultTranslatePrompt
         save()
     }
 
@@ -591,10 +793,92 @@ final class AppConfig {
         let oldL = language, oldT = translatePrompt
         let cleanL = newLang.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanT = newTrans.trimmingCharacters(in: .whitespacesAndNewlines)
-        language = cleanL.isEmpty ? AppConfig.defaultLanguage : cleanL
-        translatePrompt = cleanT.isEmpty ? AppConfig.defaultTranslatePrompt : newTrans
+        language = cleanL.isEmpty ? LegacyAppConfig.defaultLanguage : cleanL
+        translatePrompt = cleanT.isEmpty ? LegacyAppConfig.defaultTranslatePrompt : newTrans
         if save() { return true }
         language = oldL; translatePrompt = oldT
+        return false
+    }
+}
+
+final class AppConfig: Codable {
+    static let shared = AppConfig()
+
+    var translator: AzureTranslatorConfig
+    var azureOpenAI: AzureOpenAIConfig
+
+    private static var defaultURL: URL {
+        URL(fileURLWithPath: kConfigDir).appendingPathComponent("config.json")
+    }
+
+    init(
+        translator: AzureTranslatorConfig = AzureTranslatorConfig(),
+        azureOpenAI: AzureOpenAIConfig = AzureOpenAIConfig()
+    ) {
+        self.translator = translator
+        self.azureOpenAI = azureOpenAI
+    }
+
+    func load() {
+        let loaded = Self.loadOrCreate(at: Self.defaultURL)
+        translator = loaded.translator
+        azureOpenAI = loaded.azureOpenAI
+    }
+
+    @discardableResult
+    func save() -> Bool {
+        save(to: Self.defaultURL)
+    }
+
+    @discardableResult
+    func save(to url: URL) -> Bool {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(self) else { return false }
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func load(from url: URL) -> AppConfig? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(AppConfig.self, from: data)
+    }
+
+    static func loadOrCreate(at url: URL) -> AppConfig {
+        if let loaded = load(from: url) { return loaded }
+
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if fileManager.fileExists(atPath: url.path) {
+            let backupURL = url.deletingLastPathComponent()
+                .appendingPathComponent("config.pre-azure-backup.json")
+            if !fileManager.fileExists(atPath: backupURL.path) {
+                try? fileManager.copyItem(at: url, to: backupURL)
+            }
+        }
+
+        let defaults = AppConfig()
+        _ = defaults.save(to: url)
+        return defaults
+    }
+
+    @discardableResult
+    func setAzureServices(translator newTranslator: AzureTranslatorConfig, azureOpenAI newAzureOpenAI: AzureOpenAIConfig) -> Bool {
+        let oldTranslator = translator
+        let oldAzureOpenAI = azureOpenAI
+        translator = newTranslator
+        azureOpenAI = newAzureOpenAI
+        if save() { return true }
+        translator = oldTranslator
+        azureOpenAI = oldAzureOpenAI
         return false
     }
 }

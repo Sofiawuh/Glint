@@ -5,7 +5,7 @@
 `Glint` 是一款纯原生 AppKit（Swift 5）编写的 macOS 菜单栏 AI 划词翻译、解释与截图讲解助手（最低支持 macOS 12.0，Universal Binary `arm64 + x86_64`）。核心能力包括：
 - **划词即译 / 即解**：全局监听鼠标划词，在光标右下角弹出「翻译」「解释」悬浮胶囊，支持流式 Markdown 富文本渲染与多轮上下文追问。
 - **截图解释**：通过全局热键 `⌃⌥E` 框选屏幕区域，调用多模态大模型看图讲解并支持继续追问。
-- **自带 Key 直连**：支持配置 OpenAI 兼容、Anthropic 兼容、Gemini / Vertex AI 兼容模型服务商，配置持久化于本机 `~/.config/glint/config.json`，无中间服务器。
+- **Azure 双服务直连**：划词翻译直连 Azure Text Translation，提问、追问与截图理解直连 Azure OpenAI v1；配置持久化于本机 `~/.config/glint/config.json`，无中间服务器。
 
 ## 2. 仓库范围与命名约定
 

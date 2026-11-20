@@ -59,9 +59,10 @@ func logLine(_ s: String) {
 
 // MARK: - API Key 读取
 
-// 当前厂商的 key(空算无);供菜单状态等处复用
+// 当前 Azure GPT Key（空算无）；供状态检查复用。
 func readAPIKey() -> String? {
-    guard let k = AppConfig.shared.active?.apiKey, !k.isEmpty else { return nil }
+    let k = AppConfig.shared.azureOpenAI.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !k.isEmpty else { return nil }
     return k
 }
 
@@ -135,21 +136,13 @@ func selectedTextViaCopy() -> String? {
     return nil
 }
 
-// MARK: - 翻译(支持 OpenAI / Anthropic / Gemini 兼容协议)
+// MARK: - Azure Text Translation
 
 func translate(_ text: String, completion: @escaping (String?, String?) -> Void) {
-    guard let prov = AppConfig.shared.active, !prov.apiKey.isEmpty else {
-        completion(nil, "没配置 API Key。请点菜单栏 Glint 图标 →「设置…」→「服务商」填入当前服务商的 Key")
+    let config = AppConfig.shared.translator
+    guard let req = config.buildRequest(text: text) else {
+        completion(nil, "Azure Translator 配置不完整。请在设置 → Azure 中检查 Endpoint 和 API Key。")
         return
-    }
-    let sys = AppConfig.shared.resolvedTranslatePrompt
-
-    let messages: [[String: Any]] = [
-        ["role": "system", "content": sys],
-        ["role": "user", "content": text]
-    ]
-    guard let req = prov.buildRequest(messages: messages, temperature: 0.3, maxTokens: kMaxTokens, stream: false) else {
-        completion(nil, "请求构造失败"); return
     }
 
     URLSession.shared.dataTask(with: req) { respData, resp, err in
@@ -157,20 +150,21 @@ func translate(_ text: String, completion: @escaping (String?, String?) -> Void)
             DispatchQueue.main.async { completion(nil, "网络错误:\(err.localizedDescription)") }
             return
         }
-        if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-            DispatchQueue.main.async { completion(nil, "\(prov.name) 出错(HTTP \(http.statusCode)),请检查 Key 或余额") }
+        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let message = config.parseError(statusCode: http.statusCode, data: respData)
+            DispatchQueue.main.async { completion(nil, message) }
             return
         }
         guard let respData = respData,
-              let content = prov.parseResponse(data: respData) else {
-            DispatchQueue.main.async { completion(nil, "返回解析失败") }
+              let content = config.parseResponse(data: respData) else {
+            DispatchQueue.main.async { completion(nil, "Azure Translator 返回解析失败") }
             return
         }
         DispatchQueue.main.async { completion(content.trimmingCharacters(in: .whitespacesAndNewlines), nil) }
     }.resume()
 }
 
-// MARK: - 提问 / 追问(支持 OpenAI / Anthropic / Gemini 流式 / SSE)
+// MARK: - Azure GPT 提问 / 追问（SSE）
 
 // 通用流式对话:messages 为完整消息数组(含 system);逐字回吐(打字机)。
 // 返回可取消的 Task;无 key 等同步错误时回调 onError 并返回 nil。
@@ -179,32 +173,36 @@ func chatStream(_ messages: [[String: Any]],
                 onDelta: @escaping (String) -> Void,
                 onDone: @escaping (String) -> Void,
                 onError: @escaping (String) -> Void) -> Task<Void, Never>? {
-    guard let prov = AppConfig.shared.active, !prov.apiKey.isEmpty else {
-        onError("没配置 API Key。请点菜单栏 Glint 图标 →「设置…」→「服务商」填入当前服务商的 Key")
+    let config = AppConfig.shared.azureOpenAI
+    guard let req = config.buildRequest(messages: messages, maxTokens: kMaxTokens, stream: true) else {
+        onError("Azure GPT 配置不完整。请在设置 → Azure 中检查 Endpoint、API Key 和部署名称。")
         return nil
-    }
-    guard let req = prov.buildRequest(messages: messages, temperature: 0.5, maxTokens: kMaxTokens, stream: true) else {
-        onError("请求构造失败"); return nil
     }
 
     return Task {
         var accum = ""
         do {
             let (bytes, resp) = try await URLSession.shared.bytes(for: req)
-            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-                await MainActor.run { onError("\(prov.name) 出错(HTTP \(http.statusCode)),请检查 Key 或余额") }
+            if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                var errorData = Data()
+                for try await byte in bytes {
+                    errorData.append(byte)
+                    if errorData.count >= 65_536 { break }
+                }
+                let message = config.parseError(statusCode: http.statusCode, data: errorData)
+                await MainActor.run { onError(message) }
                 return
             }
             var finished = false
             for try await line in bytes.lines {
                 if Task.isCancelled || finished { break }
-                switch prov.parseStreamLine(line) {
+                switch config.parseStreamLine(line) {
                 case .ignore:
                     continue
                 case .done:
                     finished = true
                 case .error(let errMsg):
-                    await MainActor.run { onError("\(prov.name) 出错:\(errMsg)") }
+                    await MainActor.run { onError("Azure GPT 出错：\(errMsg)") }
                     return
                 case .delta(let piece):
                     accum += piece
@@ -216,7 +214,7 @@ func chatStream(_ messages: [[String: Any]],
             let full = accum
             await MainActor.run {
                 if full.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    onError("\(prov.name) 没有返回内容")
+                    onError("Azure GPT 没有返回内容")
                 } else {
                     onDone(full)
                 }
@@ -587,6 +585,8 @@ final class CircleIconButton: NSButton {
     enum IconKind {
         case copy
         case copied
+        case pin
+        case pinned
         case close
     }
 
@@ -630,18 +630,21 @@ final class CircleIconButton: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         let circleRect = bounds.insetBy(dx: 0.75, dy: 0.75)
         let circle = NSBezierPath(ovalIn: circleRect)
-        let bg = (hovering || pressing) ? ClaudeTheme.pillHoverBg : ClaudeTheme.paperAltBg
+        let isPinnedIcon = iconKind == .pinned
+        let bg = isPinnedIcon
+            ? ClaudeTheme.terracotta.withAlphaComponent((hovering || pressing) ? 0.18 : 0.11)
+            : ((hovering || pressing) ? ClaudeTheme.pillHoverBg : ClaudeTheme.paperAltBg)
         bg.setFill()
         circle.fill()
-        ClaudeTheme.windowBorder.setStroke()
+        (isPinnedIcon ? ClaudeTheme.terracotta.withAlphaComponent(0.55) : ClaudeTheme.windowBorder).setStroke()
         circle.lineWidth = 1.0
         circle.stroke()
 
         let strokeColor: NSColor
         switch iconKind {
-        case .copied:
+        case .copied, .pinned:
             strokeColor = ClaudeTheme.terracotta
-        case .copy, .close:
+        case .copy, .pin, .close:
             strokeColor = (hovering || pressing) ? ClaudeTheme.inkStrong : ClaudeTheme.inkMuted
         }
         strokeColor.setStroke()
@@ -683,6 +686,24 @@ final class CircleIconButton: NSButton {
             check.lineCapStyle = .round
             check.lineJoinStyle = .round
             check.stroke()
+
+        case .pin, .pinned:
+            // 线性图钉:顶部横帽、收腰针身与向下针尖
+            let pin = NSBezierPath()
+            pin.move(to: NSPoint(x: cx - 4.2, y: cy - 4.8))
+            pin.line(to: NSPoint(x: cx + 4.2, y: cy - 4.8))
+            pin.move(to: NSPoint(x: cx - 2.9, y: cy - 4.8))
+            pin.line(to: NSPoint(x: cx - 2.0, y: cy + 0.2))
+            pin.line(to: NSPoint(x: cx - 4.3, y: cy + 2.2))
+            pin.line(to: NSPoint(x: cx + 4.3, y: cy + 2.2))
+            pin.line(to: NSPoint(x: cx + 2.0, y: cy + 0.2))
+            pin.line(to: NSPoint(x: cx + 2.9, y: cy - 4.8))
+            pin.move(to: NSPoint(x: cx, y: cy + 2.2))
+            pin.line(to: NSPoint(x: cx, y: cy + 6.1))
+            pin.lineWidth = iconKind == .pinned ? 1.65 : 1.4
+            pin.lineCapStyle = .round
+            pin.lineJoinStyle = .round
+            pin.stroke()
 
         case .close:
             let r: CGFloat = 3.8
@@ -890,6 +911,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var pendingText: String?
     private var lastResult: String?
     private weak var copyButton: CircleIconButton?
+    private weak var pinButton: CircleIconButton?
     private weak var capsuleContainer: CapsuleInputContainerView?
     private weak var sendButton: SendArrowButton?
     private let appearDur: TimeInterval = 0.14
@@ -919,16 +941,23 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private let inputBarH: CGFloat = 56                          // 底部悬浮胶囊输入栏高度
     private let transcriptBottomGap: CGFloat = 8                 // transcript 与底部胶囊之间的留白
     private var panelIsResizable = false                         // 当前态是否「可缩放/记忆」的内容浮窗(结果/会话)
+    private var panelIsRestorable = false                        // 当前态外部点击后是否只隐藏并保留内存上下文
     private var growTimer: Timer?                                // 会话浮窗随流式内容长高的节流定时器
     private var userResized = false                              // 本轮会话中用户手动改过尺寸 → 不再自动长高
+    private var hiddenFrame: NSRect?                             // 隐藏前的位置与尺寸,菜单恢复时原样还原
+    private var lockFrameAfterRestore = false                    // 恢复后保持隐藏前尺寸,流式内容改在内部滚动
     private var frameAnimations = 0                              // 进行中的窗口帧动画计数(>0 时 p.frame 是中间态,长高/存尺寸必须跳过)
     private var programmaticSize = NSSize.zero                   // 最近一次程序化 setFrame 的目标尺寸(识别假 live resize 用)
     private let kPopupSizeKey = "popupSize"
     private let minPopupSize = NSSize(width: 320, height: 200)
     private let minCompactSize = NSSize(width: 120, height: 34)
     private let defaultPopupSize = NSSize(width: 500, height: 460)
+    private var lifecycle = PopupLifecycle()
 
-    var isVisible: Bool { panel != nil }
+    var isVisible: Bool { panel?.isVisible ?? false }
+    var canRestore: Bool { panel != nil && lifecycle.canRestore }
+    var isPinned: Bool { lifecycle.isPinned }
+    var shouldIgnoreNewSelection: Bool { lifecycle.newSelection() == .ignore }
     func frame() -> NSRect? { panel?.frame }
     // 追问输入法正在合成(点候选词等):外部点击不应关闭会话
     var isComposingText: Bool { (askField?.currentEditor() as? NSTextView)?.hasMarkedText() ?? false }
@@ -936,14 +965,57 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @objc func dismiss() {
         guard let p = panel else { return }
         NSCursor.arrow.set()
+        lifecycle.dismiss()
+        hiddenFrame = nil
+        lockFrameAfterRestore = false
         generation += 1
         stopConversation()
-        panel = nil; body = nil; pendingText = nil
+        panel = nil; body = nil; pendingText = nil; pinButton = nil
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = self.dismissDur
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
             p.animator().alphaValue = 0
         }, completionHandler: { p.orderOut(nil) })
+        gAppDelegate?.refreshMenu()
+    }
+
+    func handleOutsideClick() {
+        switch lifecycle.outsideClick() {
+        case .none:
+            return
+        case .hide:
+            hiddenFrame = panel?.frame
+            lockFrameAfterRestore = true
+            panel?.orderOut(nil)
+            gAppDelegate?.refreshMenu()
+        case .dismiss:
+            dismiss()
+        }
+    }
+
+    @discardableResult
+    func restoreLastWindow() -> Bool {
+        guard lifecycle.restore(), let p = panel else { return false }
+        p.alphaValue = 1
+        if let frame = hiddenFrame {
+            programmaticSize = frame.size
+            p.setFrame(frame, display: false)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        p.makeKeyAndOrderFront(nil)
+        if askField != nil { focusAskField() }
+        gAppDelegate?.refreshMenu()
+        return true
+    }
+
+    @objc private func onTogglePin() {
+        guard lifecycle.togglePin() else { return }
+        updatePinButton()
+    }
+
+    private func updatePinButton() {
+        pinButton?.iconKind = lifecycle.isPinned ? .pinned : .pin
+        pinButton?.toolTip = lifecycle.isPinned ? "取消钉住" : "钉住窗口"
     }
 
     // 切换背板的圆角与边框色(快捷悬浮条:10pt 圆角 + #E3E1D8;展开大弹窗:14pt 圆角 + #E8E6DE)
@@ -965,6 +1037,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             frameAnimations = 0
         }
         panelIsResizable = false
+        panelIsRestorable = false
         pendingText = text
         let pad: CGFloat = 4
         let gap: CGFloat = 2
@@ -995,11 +1068,16 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // 帧动画期间新旧内容都临时改成「固定尺寸、贴住顶边」(.minYMargin),
     // 避免 autoresize 以动画中途的尺寸为基准把内容压缩/挤出可视区;动画完成后再恢复跟随窗口。
     private func present(content newBody: NSView, rect: NSRect, isPill: Bool = false) {
+        lifecycle.present(isRestorableContent: panelIsRestorable, allowsPinning: panelIsResizable)
+        hiddenFrame = nil
+        lockFrameAfterRestore = false
+        updatePinButton()
         programmaticSize = rect.size
         let targetMinSize = panelIsResizable
             ? NSSize(width: min(rect.width, minPopupSize.width), height: min(rect.height, minPopupSize.height))
             : minCompactSize
         if let p = panel, let paper = p.contentView {
+            let wasHidden = !p.isVisible
             p.minSize = targetMinSize
             applyPaperStyle(isPill: isPill, to: p)
             let finalMask = newBody.autoresizingMask
@@ -1011,6 +1089,11 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             let old = body
             old?.autoresizingMask = [.minYMargin]
             body = newBody
+            if wasHidden {
+                p.alphaValue = 1
+                NSApp.activate(ignoringOtherApps: true)
+                p.makeKeyAndOrderFront(nil)
+            }
             frameAnimations += 1
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = self.switchDur
@@ -1029,6 +1112,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 if self.isAwaitingInitialPrompt {
                     self.focusAskField()
                 }
+                gAppDelegate?.refreshMenu()
             })
         } else {
             let p = makePanel(rect, isPill: isPill)
@@ -1044,6 +1128,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 p.animator().alphaValue = 1
             })
+            gAppDelegate?.refreshMenu()
         }
     }
 
@@ -1075,8 +1160,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
-    // 在弹窗右上角安装悬浮「复制」与「关闭 ×」圆形线性按钮(如图1 右上角)
+    // 在弹窗右上角安装悬浮「图钉」「复制」与「关闭 ×」圆形线性按钮
     private func addTopRightActions(to container: NSView, showCopy: Bool) {
+        if !showCopy { pinButton = nil }
         let btnSize: CGFloat = 28
         let topMargin: CGFloat = 12
         let rightMargin: CGFloat = 16
@@ -1089,6 +1175,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         )
         closeBtn.target = self
         closeBtn.action = #selector(dismiss)
+        closeBtn.toolTip = "关闭并清除会话"
         closeBtn.autoresizingMask = [.minXMargin, .minYMargin]
         container.addSubview(closeBtn)
 
@@ -1099,9 +1186,21 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             )
             cpBtn.target = self
             cpBtn.action = #selector(onCopyClicked)
+            cpBtn.toolTip = "复制"
             cpBtn.autoresizingMask = [.minXMargin, .minYMargin]
             container.addSubview(cpBtn)
             copyButton = cpBtn
+
+            let pinBtn = CircleIconButton(
+                frame: NSRect(x: cpBtn.frame.minX - gap - btnSize, y: y, width: btnSize, height: btnSize),
+                iconKind: .pin
+            )
+            pinBtn.target = self
+            pinBtn.action = #selector(onTogglePin)
+            pinBtn.toolTip = "钉住窗口"
+            pinBtn.autoresizingMask = [.minXMargin, .minYMargin]
+            container.addSubview(pinBtn)
+            pinButton = pinBtn
         }
     }
 
@@ -1144,6 +1243,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         convo = []
         isAwaitingInitialPrompt = true
         panelIsResizable = false
+        panelIsRestorable = true
         lastResult = nil
         copyButton = nil
 
@@ -1325,6 +1425,170 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
+    // 图钉 / 隐藏 / 菜单恢复 UI 烟测(本地、不走网络)
+    func runDemoPinRestore() {
+        uiTestMode = true
+        let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
+        try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+        showMessage("这是一个用于验证图钉、隐藏与恢复行为的结果窗口。\n\n点击其他应用时，未钉住窗口只隐藏；钉住窗口保持显示。", isError: false, showCopy: true, markdown: true)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self = self,
+                  let originalPanel = self.panel,
+                  let originalBody = self.body,
+                  let pin = self.pinButton,
+                  let copy = self.copyButton,
+                  pin.frame.maxX <= copy.frame.minX else {
+                fputs("FAIL: pin button missing or overlaps copy button\n", stderr)
+                exit(1)
+            }
+            let originalFrame = originalPanel.frame
+
+            func firstTextView(in view: NSView) -> NSTextView? {
+                if let textView = view as? NSTextView { return textView }
+                if let scroll = view as? NSScrollView, let textView = scroll.documentView as? NSTextView {
+                    return textView
+                }
+                for child in view.subviews {
+                    if let textView = firstTextView(in: child) { return textView }
+                }
+                return nil
+            }
+
+            func firstIconButton(in view: NSView, kind: CircleIconButton.IconKind) -> CircleIconButton? {
+                if let button = view as? CircleIconButton, button.iconKind == kind { return button }
+                for child in view.subviews {
+                    if let button = firstIconButton(in: child, kind: kind) { return button }
+                }
+                return nil
+            }
+
+            self.onTogglePin()
+            self.handleOutsideClick()
+            guard self.isPinned, self.isVisible, !self.canRestore else {
+                fputs("FAIL: pinned popup changed after outside click\n", stderr)
+                exit(1)
+            }
+            self.capturePanel(to: (outDir as NSString).appendingPathComponent("popup_pin_restore_pinned.png"))
+
+            self.onTogglePin()
+            self.handleOutsideClick()
+            let restoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+            guard !self.isVisible, self.canRestore, restoreEnabled else {
+                fputs("FAIL: unpinned popup did not become restorable\n", stderr)
+                exit(1)
+            }
+
+            let hiddenUpdate = "\n\n隐藏期间新增内容已保留。"
+            firstTextView(in: originalBody)?.textStorage?.append(NSAttributedString(string: hiddenUpdate))
+            originalPanel.setFrame(
+                NSRect(
+                    x: originalFrame.minX + 12,
+                    y: originalFrame.minY - 10,
+                    width: originalFrame.width + 20,
+                    height: originalFrame.height + 20
+                ),
+                display: false
+            )
+
+            guard self.restoreLastWindow(),
+                  self.isVisible,
+                  !self.canRestore,
+                  self.panel === originalPanel,
+                  self.body === originalBody,
+                  self.panel?.frame == originalFrame,
+                  firstTextView(in: originalBody)?.string.contains(hiddenUpdate.trimmingCharacters(in: .whitespacesAndNewlines)) == true else {
+                fputs("FAIL: popup restore did not preserve identity, frame or hidden updates\n", stderr)
+                exit(1)
+            }
+            self.capturePanel(to: (outDir as NSString).appendingPathComponent("popup_pin_restore.png"))
+
+            let promptAnchor = NSPoint(x: originalFrame.minX, y: originalFrame.maxY)
+            self.showPromptComposer(context: .text("用于验证提问草稿恢复的上下文"), anchorTopLeft: promptAnchor)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self = self, let promptPanel = self.panel, let askField = self.askField else {
+                    fputs("FAIL: prompt composer missing\n", stderr)
+                    exit(1)
+                }
+                askField.stringValue = "这条未发送的提问草稿需要保留"
+                self.onTogglePin()
+                self.handleOutsideClick()
+                let promptRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+                guard !self.isVisible, self.canRestore, !self.isPinned, promptRestoreEnabled else {
+                    fputs("FAIL: prompt composer did not hide as an unpinned restorable window\n", stderr)
+                    exit(1)
+                }
+                guard self.restoreLastWindow(),
+                      self.panel === promptPanel,
+                      self.askField?.stringValue == "这条未发送的提问草稿需要保留" else {
+                    fputs("FAIL: prompt composer draft was not restored\n", stderr)
+                    exit(1)
+                }
+                self.capturePanel(to: (outDir as NSString).appendingPathComponent("popup_prompt_restore.png"))
+
+                self.handleOutsideClick()
+                let replacementImage = NSImage(size: NSSize(width: 160, height: 90))
+                self.showPromptComposer(
+                    context: .image(replacementImage, dataURL: "data:image/png;base64,AA=="),
+                    anchorTopLeft: promptAnchor
+                )
+                guard self.panel === promptPanel, self.isVisible, !self.canRestore else {
+                    fputs("FAIL: replacing a hidden session did not reveal the reused panel\n", stderr)
+                    exit(1)
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    guard let self = self,
+                          let body = self.body,
+                          let closeButton = firstIconButton(in: body, kind: .close) else {
+                        fputs("FAIL: close button missing\n", stderr)
+                        exit(1)
+                    }
+                    self.capturePanel(to: (outDir as NSString).appendingPathComponent("popup_hidden_session_replaced.png"))
+
+                    let closeGeneration = self.generation
+                    let closeTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 30_000_000_000) }
+                    self.convoTask = closeTask
+                    closeButton.performClick(nil)
+                    let closeRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+                    guard closeTask.isCancelled,
+                          self.generation == closeGeneration + 1,
+                          self.panel == nil,
+                          self.sessionContext == nil,
+                          self.convo.isEmpty,
+                          self.askField == nil,
+                          !self.canRestore,
+                          !closeRestoreEnabled else {
+                        fputs("FAIL: close button did not cancel and clear the session\n", stderr)
+                        exit(1)
+                    }
+
+                    self.showPromptComposer(context: .text("用于验证 Escape 明确关闭"), anchorTopLeft: promptAnchor)
+                    let escapeGeneration = self.generation
+                    let escapeTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 30_000_000_000) }
+                    self.convoTask = escapeTask
+                    self.panel?.cancelOperation(nil)
+                    let escapeRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+                    guard escapeTask.isCancelled,
+                          self.generation == escapeGeneration + 1,
+                          self.panel == nil,
+                          self.sessionContext == nil,
+                          self.askField == nil,
+                          !self.canRestore,
+                          !escapeRestoreEnabled else {
+                        fputs("FAIL: Escape did not cancel and clear the session\n", stderr)
+                        exit(1)
+                    }
+
+                    print("UITEST pin_restore PASS")
+                    fflush(stdout)
+                    logLine("UITEST pin_restore PASS")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { NSApp.terminate(nil) }
+                }
+            }
+        }
+    }
+
     // UI 自测入口(仅 GLINT_UITEST=explain 时调用):程序化冒按钮 → 提问卡片 → 填入 Prompt → 追问。
     func runDemoExplain() {
         uiTestMode = true
@@ -1462,9 +1726,10 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
-    // 搭建会话浮窗骨架(右上角悬浮复制/关闭按钮 + transcript 滚动区 + 底部悬浮胶囊输入栏)
+    // 搭建会话浮窗骨架(右上角悬浮图钉/复制/关闭按钮 + transcript 滚动区 + 底部悬浮胶囊输入栏)
     private func installConversationPanel(topLeft: NSPoint) {
         panelIsResizable = true
+        panelIsRestorable = true
         userResized = false
         let w = savedPopupSize().width
         let currentH = panel?.frame.height ?? minPopupSize.height
@@ -1491,7 +1756,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         // 底部悬浮胶囊输入栏(无横贯分割线)
         container.addSubview(makeInputBar(width: w))
 
-        // 右上角悬浮「复制」与「关闭 ×」圆形线性按钮
+        // 右上角悬浮「图钉」「复制」与「关闭 ×」圆形线性按钮
         addTopRightActions(to: container, showCopy: true)
 
         assistantStart = 0
@@ -1531,7 +1796,8 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // 顶边固定向下生长;只长不缩(防抖);上限见 popupHeightCap
     private func growToFit() {
         syncTranscriptLayout()
-        guard frameAnimations == 0, panelIsResizable, !userResized, let p = panel, let tv = convoTextView,
+        guard frameAnimations == 0, panelIsResizable, !userResized, !lockFrameAfterRestore,
+              let p = panel, p.isVisible, let tv = convoTextView,
               let lm = tv.layoutManager, let tc = tv.textContainer else { return }
         let contentH = ceil(lm.usedRect(for: tc).height + tv.textContainerInset.height * 2)
         let desired = headerTopH + contentH + transcriptBottomGap + inputBarH
@@ -1926,7 +2192,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    // 彻底结束会话:取消网络、停定时器、清状态(失焦关闭 / 新划词 / 新会话时)
+    // 彻底结束会话:取消网络、停定时器、清状态(明确关闭 / 新划词 / 新会话时)
     private func stopConversation() {
         convoTask?.cancel(); convoTask = nil
         growTimer?.invalidate(); growTimer = nil
@@ -1962,6 +2228,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         lastResult = showCopy ? message : nil
         copyButton = nil
         panelIsResizable = showCopy          // 译文结果:可缩放 + 记忆上限;翻译中/错误:瞬时小窗
+        panelIsRestorable = showCopy         // 只有完整译文结果可从菜单恢复
         let topLeft = panel.map { NSPoint(x: $0.frame.minX, y: $0.frame.maxY) } ?? NSEvent.mouseLocation
 
         let pad: CGFloat = showCopy ? 24 : 18
@@ -2123,6 +2390,10 @@ func handleMouseUp(down: CGPoint, up: CGPoint) {
         DispatchQueue.main.async {
             gFetchInFlight = false
             guard let text = text else { return }
+            if gAppDelegate?.popup.shouldIgnoreNewSelection == true {
+                logLine("  skip: popup pinned")
+                return
+            }
             // 锚点用「释放那一刻」的光标位置(Quartz→AppKit 翻转),精确落在光标右下角
             let upAK = NSPoint(x: up.x, y: primaryScreenHeight() - up.y)
             gAppDelegate?.popup.showButton(text: text, fallbackPoint: upAK)
@@ -2149,7 +2420,7 @@ let gEventCallback: CGEventTapCallBack = { _, type, event, _ in
                 } else if ad.popup.isComposingText {
                     gDownInsidePopup = true        // 输入法候选窗在浮窗外:点候选词不关、不当作新划词
                 } else {
-                    ad.popup.dismiss()             // 点在浮窗外:失焦关闭
+                    ad.popup.handleOutsideClick()  // 内容窗隐藏并可恢复;快捷胶囊仍直接关闭;钉住窗保持显示
                 }
             }
         }
@@ -2266,7 +2537,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // UI 截图自测(不建事件 tap / 不请求权限),便于截屏验证真实渲染:
         //   GLINT_UITEST=prompt_context → 划词提问 + 截图提问卡片自检(本地、不走网络)
         //   GLINT_UITEST=translate      → 翻译流程(本地、不走网络)
-        //   GLINT_UITEST=settings       → 设置窗口四 Tab 自检
+        //   GLINT_UITEST=settings       → 设置窗口三 Tab 自检
+        //   GLINT_UITEST=pin_restore    → 图钉、隐藏与恢复自检
         //   其它值 → 提问会话流程(走真实 API)
         if let mode = ProcessInfo.processInfo.environment["GLINT_UITEST"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -2277,6 +2549,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.popup.runDemoTranslate()
                 } else if mode == "claude_ui" {
                     self.popup.runDemoClaudeUI()
+                } else if mode == "pin_restore" {
+                    self.popup.runDemoPinRestore()
                 } else if mode == "settings" {
                     self.settings.show(tab: 0)
                     let win = self.settings.windowObject
@@ -2293,13 +2567,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         logLine("UITEST settings tab=1 (权限) frame=\(self.settings.windowObject?.frame ?? .zero)")
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                             self.settings.selectTab(2)
-                            logLine("UITEST settings tab=2 (服务商) frame=\(self.settings.windowObject?.frame ?? .zero)")
+                            logLine("UITEST settings tab=2 (Azure) frame=\(self.settings.windowObject?.frame ?? .zero)")
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                self.settings.selectTab(3)
-                                logLine("UITEST settings tab=3 (语言) frame=\(self.settings.windowObject?.frame ?? .zero)")
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                    NSApp.terminate(nil)
-                                }
+                                NSApp.terminate(nil)
                             }
                         }
                     }
@@ -2355,9 +2625,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildMenu() -> NSMenu {
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ","))
+        let restoreItem = NSMenuItem(title: "显示上次窗口", action: #selector(showLastWindow), keyEquivalent: "")
+        restoreItem.target = self
+        restoreItem.isEnabled = popup.canRestore
+        menu.addItem(restoreItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q"))
+        let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+        menu.addItem(NSMenuItem.separator())
+        let quitItem = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
         return menu
     }
 
@@ -2408,10 +2687,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 截图提问:无屏幕录制权限先引导,否则弹框选遮罩,截完交给图片提问卡片
     @objc func onScreenshotExplain() {
-        guard AppConfig.shared.active?.vision == true else {
+        guard AppConfig.shared.azureOpenAI.supportsVision else {
             let a = NSAlert()
-            a.messageText = "当前服务商不支持看图"
-            a.informativeText = "当前使用的「\(AppConfig.shared.active?.name ?? "?")」没有勾选「支持看图」。请点菜单栏 Glint 图标 →「设置…」→「服务商」,切换到一个支持看图的服务商(如 Vertex AI、Gemini、MiMo)或勾选「支持看图」。"
+            a.messageText = "Azure GPT 尚未启用截图能力"
+            a.informativeText = "请点菜单栏 Glint 图标 → 设置 → Azure，确认当前部署支持图片理解，并勾选“支持截图/图片理解”。"
             a.addButton(withTitle: "打开设置"); a.addButton(withTitle: "取消")
             NSApp.activate(ignoringOtherApps: true)
             if a.runModal() == .alertFirstButtonReturn { settings.show(tab: 2) }
@@ -2454,6 +2733,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openSettings() { settings.show() }
+
+    @objc func showLastWindow() { _ = popup.restoreLastWindow() }
 
     @objc func recheck() {
         logLine("manual recheck AX_TRUSTED=\(AXIsProcessTrusted())")
