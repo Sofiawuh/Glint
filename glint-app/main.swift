@@ -59,9 +59,10 @@ func logLine(_ s: String) {
 
 // MARK: - API Key 读取
 
-// 当前厂商的 key(空算无);供菜单状态等处复用
+// 当前 Azure GPT Key（空算无）；供状态检查复用。
 func readAPIKey() -> String? {
-    guard let k = AppConfig.shared.active?.apiKey, !k.isEmpty else { return nil }
+    let k = AppConfig.shared.azureOpenAI.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !k.isEmpty else { return nil }
     return k
 }
 
@@ -135,21 +136,13 @@ func selectedTextViaCopy() -> String? {
     return nil
 }
 
-// MARK: - 翻译(支持 OpenAI / Anthropic / Gemini 兼容协议)
+// MARK: - Azure Text Translation
 
 func translate(_ text: String, completion: @escaping (String?, String?) -> Void) {
-    guard let prov = AppConfig.shared.active, !prov.apiKey.isEmpty else {
-        completion(nil, "没配置 API Key。请点菜单栏 Glint 图标 →「设置…」→「服务商」填入当前服务商的 Key")
+    let config = AppConfig.shared.translator
+    guard let req = config.buildRequest(text: text) else {
+        completion(nil, "Azure Translator 配置不完整。请在设置 → Azure 中检查 Endpoint 和 API Key。")
         return
-    }
-    let sys = AppConfig.shared.resolvedTranslatePrompt
-
-    let messages: [[String: Any]] = [
-        ["role": "system", "content": sys],
-        ["role": "user", "content": text]
-    ]
-    guard let req = prov.buildRequest(messages: messages, temperature: 0.3, maxTokens: kMaxTokens, stream: false) else {
-        completion(nil, "请求构造失败"); return
     }
 
     URLSession.shared.dataTask(with: req) { respData, resp, err in
@@ -157,20 +150,21 @@ func translate(_ text: String, completion: @escaping (String?, String?) -> Void)
             DispatchQueue.main.async { completion(nil, "网络错误:\(err.localizedDescription)") }
             return
         }
-        if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-            DispatchQueue.main.async { completion(nil, "\(prov.name) 出错(HTTP \(http.statusCode)),请检查 Key 或余额") }
+        if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            let message = config.parseError(statusCode: http.statusCode, data: respData)
+            DispatchQueue.main.async { completion(nil, message) }
             return
         }
         guard let respData = respData,
-              let content = prov.parseResponse(data: respData) else {
-            DispatchQueue.main.async { completion(nil, "返回解析失败") }
+              let content = config.parseResponse(data: respData) else {
+            DispatchQueue.main.async { completion(nil, "Azure Translator 返回解析失败") }
             return
         }
         DispatchQueue.main.async { completion(content.trimmingCharacters(in: .whitespacesAndNewlines), nil) }
     }.resume()
 }
 
-// MARK: - 提问 / 追问(支持 OpenAI / Anthropic / Gemini 流式 / SSE)
+// MARK: - Azure GPT 提问 / 追问（SSE）
 
 // 通用流式对话:messages 为完整消息数组(含 system);逐字回吐(打字机)。
 // 返回可取消的 Task;无 key 等同步错误时回调 onError 并返回 nil。
@@ -179,32 +173,36 @@ func chatStream(_ messages: [[String: Any]],
                 onDelta: @escaping (String) -> Void,
                 onDone: @escaping (String) -> Void,
                 onError: @escaping (String) -> Void) -> Task<Void, Never>? {
-    guard let prov = AppConfig.shared.active, !prov.apiKey.isEmpty else {
-        onError("没配置 API Key。请点菜单栏 Glint 图标 →「设置…」→「服务商」填入当前服务商的 Key")
+    let config = AppConfig.shared.azureOpenAI
+    guard let req = config.buildRequest(messages: messages, temperature: 0.5, maxTokens: kMaxTokens, stream: true) else {
+        onError("Azure GPT 配置不完整。请在设置 → Azure 中检查 Endpoint、API Key 和部署名称。")
         return nil
-    }
-    guard let req = prov.buildRequest(messages: messages, temperature: 0.5, maxTokens: kMaxTokens, stream: true) else {
-        onError("请求构造失败"); return nil
     }
 
     return Task {
         var accum = ""
         do {
             let (bytes, resp) = try await URLSession.shared.bytes(for: req)
-            if let http = resp as? HTTPURLResponse, http.statusCode != 200 {
-                await MainActor.run { onError("\(prov.name) 出错(HTTP \(http.statusCode)),请检查 Key 或余额") }
+            if let http = resp as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+                var errorData = Data()
+                for try await byte in bytes {
+                    errorData.append(byte)
+                    if errorData.count >= 65_536 { break }
+                }
+                let message = config.parseError(statusCode: http.statusCode, data: errorData)
+                await MainActor.run { onError(message) }
                 return
             }
             var finished = false
             for try await line in bytes.lines {
                 if Task.isCancelled || finished { break }
-                switch prov.parseStreamLine(line) {
+                switch config.parseStreamLine(line) {
                 case .ignore:
                     continue
                 case .done:
                     finished = true
                 case .error(let errMsg):
-                    await MainActor.run { onError("\(prov.name) 出错:\(errMsg)") }
+                    await MainActor.run { onError("Azure GPT 出错：\(errMsg)") }
                     return
                 case .delta(let piece):
                     accum += piece
@@ -216,7 +214,7 @@ func chatStream(_ messages: [[String: Any]],
             let full = accum
             await MainActor.run {
                 if full.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    onError("\(prov.name) 没有返回内容")
+                    onError("Azure GPT 没有返回内容")
                 } else {
                     onDone(full)
                 }
@@ -2266,7 +2264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // UI 截图自测(不建事件 tap / 不请求权限),便于截屏验证真实渲染:
         //   GLINT_UITEST=prompt_context → 划词提问 + 截图提问卡片自检(本地、不走网络)
         //   GLINT_UITEST=translate      → 翻译流程(本地、不走网络)
-        //   GLINT_UITEST=settings       → 设置窗口四 Tab 自检
+        //   GLINT_UITEST=settings       → 设置窗口三 Tab 自检
         //   其它值 → 提问会话流程(走真实 API)
         if let mode = ProcessInfo.processInfo.environment["GLINT_UITEST"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -2293,13 +2291,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         logLine("UITEST settings tab=1 (权限) frame=\(self.settings.windowObject?.frame ?? .zero)")
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                             self.settings.selectTab(2)
-                            logLine("UITEST settings tab=2 (服务商) frame=\(self.settings.windowObject?.frame ?? .zero)")
+                            logLine("UITEST settings tab=2 (Azure) frame=\(self.settings.windowObject?.frame ?? .zero)")
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                self.settings.selectTab(3)
-                                logLine("UITEST settings tab=3 (语言) frame=\(self.settings.windowObject?.frame ?? .zero)")
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                    NSApp.terminate(nil)
-                                }
+                                NSApp.terminate(nil)
                             }
                         }
                     }
@@ -2408,10 +2402,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // 截图提问:无屏幕录制权限先引导,否则弹框选遮罩,截完交给图片提问卡片
     @objc func onScreenshotExplain() {
-        guard AppConfig.shared.active?.vision == true else {
+        guard AppConfig.shared.azureOpenAI.supportsVision else {
             let a = NSAlert()
-            a.messageText = "当前服务商不支持看图"
-            a.informativeText = "当前使用的「\(AppConfig.shared.active?.name ?? "?")」没有勾选「支持看图」。请点菜单栏 Glint 图标 →「设置…」→「服务商」,切换到一个支持看图的服务商(如 Vertex AI、Gemini、MiMo)或勾选「支持看图」。"
+            a.messageText = "Azure GPT 尚未启用截图能力"
+            a.informativeText = "请点菜单栏 Glint 图标 → 设置 → Azure，确认当前部署支持图片理解，并勾选“支持截图/图片理解”。"
             a.addButton(withTitle: "打开设置"); a.addButton(withTitle: "取消")
             NSApp.activate(ignoringOtherApps: true)
             if a.runModal() == .alertFirstButtonReturn { settings.show(tab: 2) }
