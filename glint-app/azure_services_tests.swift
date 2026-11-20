@@ -115,7 +115,7 @@ final class TestAzureOpenAIRequest {
         ]
         let urls = endpoints.compactMap {
             makeConfig(endpoint: $0)
-                .buildRequest(messages: messages, temperature: 0.2, maxTokens: 256, stream: false)?
+                .buildRequest(messages: messages, maxTokens: 256, stream: false)?
                 .url?.absoluteString
         }
 
@@ -128,7 +128,7 @@ final class TestAzureOpenAIRequest {
 
     static func test_messagesAndDeployment_buildAzureChatBodyWithoutThinking() {
         let request = makeConfig(endpoint: "https://sample-resource.openai.azure.com/openai/v1")
-            .buildRequest(messages: messages, temperature: 0.2, maxTokens: 256, stream: true)
+            .buildRequest(messages: messages, maxTokens: 256, stream: true)
         let body = AzureTestSupport.jsonDictionary(request?.httpBody)
         let encodedBody = request?.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         let requestMessages = body?["messages"] as? [[String: Any]]
@@ -144,7 +144,9 @@ final class TestAzureOpenAIRequest {
                 && requestMessages?.last?["content"] as? String == "Explain this code."
                 && body?["stream"] as? Bool == true
                 && body?["max_completion_tokens"] as? Int == 256
+                && body?["temperature"] == nil
                 && body?["thinking"] == nil
+                && !encodedBody.contains("\"temperature\"")
                 && !encodedBody.contains("\"thinking\""),
             "TestAzureOpenAIRequest.test_messagesAndDeployment_buildAzureChatBodyWithoutThinking"
         )
@@ -408,6 +410,7 @@ final class TestAzureConnectionProbeRequest {
                 && messages?.count == 1
                 && messages?.first?["role"] as? String == "user"
                 && !(messages?.first?["content"] as? String ?? "").isEmpty
+                && body?["temperature"] == nil
                 && body?["thinking"] == nil,
             "TestAzureConnectionProbeRequest.test_unsavedGptValues_buildMinimalNonStreamingChatProbe"
         )

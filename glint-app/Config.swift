@@ -183,7 +183,6 @@ struct AzureOpenAIConfig: Codable, Equatable {
 
     func buildRequest(
         messages: [[String: Any]],
-        temperature: Double,
         maxTokens: Int,
         stream: Bool
     ) -> URLRequest? {
@@ -199,7 +198,6 @@ struct AzureOpenAIConfig: Codable, Equatable {
         let body: [String: Any] = [
             "model": cleanDeployment,
             "messages": messages,
-            "temperature": temperature,
             "max_completion_tokens": maxTokens,
             "stream": stream
         ]
@@ -210,7 +208,6 @@ struct AzureOpenAIConfig: Codable, Equatable {
     func buildProbeRequest() -> URLRequest? {
         buildRequest(
             messages: [["role": "user", "content": "Reply with OK."]],
-            temperature: 0,
             maxTokens: 8,
             stream: false
         )

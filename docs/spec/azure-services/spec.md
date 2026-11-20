@@ -51,6 +51,7 @@
 
 - `AzureTranslatorConfig` 负责 Translator 连接信息、目标语言判断、请求构造与响应解析。
 - `AzureOpenAIConfig` 负责 Azure OpenAI v1 Endpoint 规范化、请求构造、非流式解析和 SSE 增量解析。
+- Azure GPT 请求不显式发送 `temperature`，由部署使用服务端默认值，以兼容拒绝自定义温度的新模型。
 - `AppConfig` 聚合并持久化上述两组 Azure 配置。
 - `translate` 仅调用 Translator；`chatStream` 与截图会话仅调用 Azure OpenAI。
 - 网络错误解析统一提取 Azure JSON 错误中的 `error.code` 与 `error.message`，不得回显 API Key 或 Authorization 信息。

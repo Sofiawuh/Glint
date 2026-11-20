@@ -174,7 +174,7 @@ func chatStream(_ messages: [[String: Any]],
                 onDone: @escaping (String) -> Void,
                 onError: @escaping (String) -> Void) -> Task<Void, Never>? {
     let config = AppConfig.shared.azureOpenAI
-    guard let req = config.buildRequest(messages: messages, temperature: 0.5, maxTokens: kMaxTokens, stream: true) else {
+    guard let req = config.buildRequest(messages: messages, maxTokens: kMaxTokens, stream: true) else {
         onError("Azure GPT 配置不完整。请在设置 → Azure 中检查 Endpoint、API Key 和部署名称。")
         return nil
     }

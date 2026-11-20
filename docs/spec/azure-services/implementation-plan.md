@@ -4,7 +4,7 @@
 
 - 在 `glint-app/Config.swift` 中以 `AzureTranslatorConfig`、`AzureOpenAIConfig` 取代用户可见的多服务商配置模型。
 - Translator 提供：配置校验、中文字符目标语言判断、`/translate?api-version=3.0&to=` URL 构造、Key/Region 请求头、JSON Body、响应与 Azure 错误解析。
-- Azure OpenAI 提供：`/openai/v1` Endpoint 规范化、`/chat/completions` URL 构造、`api-key` 请求头、Chat Completions Body、非流式/SSE 解析和 Azure 错误解析。
+- Azure OpenAI 提供：`/openai/v1` Endpoint 规范化、`/chat/completions` URL 构造、`api-key` 请求头、不含 `temperature` 的兼容 Chat Completions Body、非流式/SSE 解析和 Azure 错误解析。
 - `AppConfig` 持久化两组 Azure 配置与截图开关；旧 provider 字段不迁移。保持提示上下文、启动项与窗口行为代码不变。
 
 ## 2. 设置与运行链路
