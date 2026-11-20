@@ -806,6 +806,13 @@ final class AppConfig: Codable {
 
     var translator: AzureTranslatorConfig
     var azureOpenAI: AzureOpenAIConfig
+    var screenshotHotKey: ScreenshotHotKey
+
+    private enum CodingKeys: String, CodingKey {
+        case translator
+        case azureOpenAI
+        case screenshotHotKey
+    }
 
     private static var defaultURL: URL {
         URL(fileURLWithPath: kConfigDir).appendingPathComponent("config.json")
@@ -813,16 +820,33 @@ final class AppConfig: Codable {
 
     init(
         translator: AzureTranslatorConfig = AzureTranslatorConfig(),
-        azureOpenAI: AzureOpenAIConfig = AzureOpenAIConfig()
+        azureOpenAI: AzureOpenAIConfig = AzureOpenAIConfig(),
+        screenshotHotKey: ScreenshotHotKey = .default
     ) {
         self.translator = translator
         self.azureOpenAI = azureOpenAI
+        self.screenshotHotKey = screenshotHotKey
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        translator = try container.decode(AzureTranslatorConfig.self, forKey: .translator)
+        azureOpenAI = try container.decode(AzureOpenAIConfig.self, forKey: .azureOpenAI)
+        screenshotHotKey = try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .screenshotHotKey) ?? .default
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(translator, forKey: .translator)
+        try container.encode(azureOpenAI, forKey: .azureOpenAI)
+        try container.encode(screenshotHotKey, forKey: .screenshotHotKey)
     }
 
     func load() {
         let loaded = Self.loadOrCreate(at: Self.defaultURL)
         translator = loaded.translator
         azureOpenAI = loaded.azureOpenAI
+        screenshotHotKey = loaded.screenshotHotKey
     }
 
     @discardableResult
@@ -879,6 +903,15 @@ final class AppConfig: Codable {
         if save() { return true }
         translator = oldTranslator
         azureOpenAI = oldAzureOpenAI
+        return false
+    }
+
+    @discardableResult
+    func setScreenshotHotKey(_ newHotKey: ScreenshotHotKey) -> Bool {
+        let oldHotKey = screenshotHotKey
+        screenshotHotKey = newHotKey
+        if save() { return true }
+        screenshotHotKey = oldHotKey
         return false
     }
 }

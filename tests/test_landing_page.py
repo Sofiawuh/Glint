@@ -176,6 +176,37 @@ class TestLandingPage(unittest.TestCase):
         parser.feed(content)
         return content, parser
 
+    def test_screenshot_shortcut_is_presented_as_default_and_configurable(
+        self,
+    ) -> None:
+        content, _ = self._load_and_parse()
+        visible_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", content))
+        lowered = visible_text.lower()
+
+        self.assertIn(
+            "默认快捷键",
+            visible_text,
+            "The public site must describe ⌃⌥E as the default shortcut, not an immutable entry point",
+        )
+        self.assertIsNotNone(
+            re.search(
+                r"(?:可|可以).{0,16}(?:在)?设置.{0,16}(?:修改|自定义)|设置.{0,16}(?:修改|自定义)",
+                visible_text,
+            ),
+            "The public site must tell users the screenshot shortcut can be changed in Settings",
+        )
+        self.assertIsNotNone(
+            re.search(r"default.{0,24}(?:shortcut|hotkey)|(?:shortcut|hotkey).{0,24}default", lowered),
+            "The English public copy must describe ⌃⌥E as the default shortcut",
+        )
+        self.assertIsNotNone(
+            re.search(
+                r"settings.{0,32}(?:change|customi[sz]e)|(?:change|customi[sz]e).{0,32}settings",
+                lowered,
+            ),
+            "The English public copy must say the screenshot shortcut is configurable in Settings",
+        )
+
     def test_landing_page_html_document_has_valid_structure_and_glint_metadata(
         self,
     ) -> None:
@@ -332,7 +363,7 @@ class TestLandingPage(unittest.TestCase):
         self.assertIn(
             "⌃⌥E",
             content,
-            "Product Walkthrough must document screenshot explain shortcut '⌃⌥E'",
+            "Product Walkthrough must document the default screenshot explain shortcut '⌃⌥E'",
         )
         self.assertTrue(
             "服务商" in content or "厂商" in content,

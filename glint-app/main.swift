@@ -8,7 +8,7 @@ import os.log
 // 选中文字 → 选区旁冒泡「翻译」「提问」
 //   翻译:自动识别源语言并翻译为「语言」设置中选定的目标语言
 //   提问:将划选内容作为上下文暂存内存,弹出输入框让用户输入 Prompt 一并发送(流式 + 多轮追问)
-//   截图提问:⌃⌥E 框选屏幕 → 将截图作为上下文暂存内存,输入 Prompt 后由多模态模型回答(可追问)
+//   截图提问:自定义全局快捷键(默认 ⌃⌥E)框选屏幕 → 将截图作为上下文暂存内存,输入 Prompt 后由多模态模型回答(可追问)
 // ============================================================
 
 // MARK: - 路径 / 配置目录(最先初始化,保证日志可写,常量见 Config.swift)
@@ -2464,38 +2464,6 @@ func setupEventTap() -> Bool {
     return enabled
 }
 
-// MARK: - 全局热键(Carbon)
-
-// 注册一个系统级热键(默认 ⌃⌥E),按下时在主线程触发回调(截图解释)。
-// 用 Carbon RegisterEventHotKey:系统级、稳定、能消费按键、无需额外权限。
-final class HotKey {
-    private var ref: EventHotKeyRef?
-    private static var handlerInstalled = false
-    private static var actions: [UInt32: () -> Void] = [:]   // C 回调不能捕获上下文,按 id 查表
-
-    @discardableResult
-    init?(keyCode: UInt32, modifiers: UInt32, id: UInt32, action: @escaping () -> Void) {
-        HotKey.actions[id] = action
-        if !HotKey.handlerInstalled {
-            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                     eventKind: UInt32(kEventHotKeyPressed))
-            InstallEventHandler(GetApplicationEventTarget(), { _, event, _ -> OSStatus in
-                var hkID = EventHotKeyID()
-                GetEventParameter(event, EventParamName(kEventParamDirectObject),
-                                  EventParamType(typeEventHotKeyID), nil,
-                                  MemoryLayout<EventHotKeyID>.size, nil, &hkID)
-                HotKey.actions[hkID.id]?()
-                return noErr
-            }, 1, &spec, nil, nil)
-            HotKey.handlerInstalled = true
-        }
-        let hkID = EventHotKeyID(signature: OSType(0x504f5044), id: id)   // 'POPD'
-        let status = RegisterEventHotKey(keyCode, modifiers, hkID, GetApplicationEventTarget(), 0, &ref)
-        if status != noErr { logLine("HOTKEY register failed status=\(status)"); return nil }
-        logLine("HOTKEY registered id=\(id) keyCode=\(keyCode)")
-    }
-}
-
 // macOS Tahoe 26 起会自动给「标准动作」菜单项配图标(如「设置…」的齿轮)。
 // 通过关联对象仅允许显式调用 setExplicitIcon(_:) 的菜单项(如服务商下拉里的品牌 Logo)显示图标,
 // 其余未显式设置图标的菜单项一律返回 nil,避免状态栏菜单出现自动图标与多余缩进。
@@ -2521,8 +2489,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let popup = PopupController()
     let settings = SettingsController()
     var statusItem: NSStatusItem?
-    var hotKey: HotKey?
+    private var hotKeyManager: ScreenshotHotKeyManager?
     var activeCapture: RegionCapture?      // 截图期间强持有 RegionCapture,避免遮罩提前释放
+
+    var currentScreenshotHotKey: ScreenshotHotKey {
+        hotKeyManager?.effectiveHotKey ?? AppConfig.shared.screenshotHotKey
+    }
+
+    var screenshotHotKeyStartupMessage: String? {
+        guard let manager = hotKeyManager else { return nil }
+        if !manager.hasActiveRegistration {
+            return "截图快捷键注册失败，请录制其他组合键"
+        }
+        if manager.didFallbackToDefault {
+            return "原快捷键不可用，已恢复默认 ⌃⌥E"
+        }
+        return nil
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = BrandLogo.appIconImage()
@@ -2538,6 +2521,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         //   GLINT_UITEST=prompt_context → 划词提问 + 截图提问卡片自检(本地、不走网络)
         //   GLINT_UITEST=translate      → 翻译流程(本地、不走网络)
         //   GLINT_UITEST=settings       → 设置窗口三 Tab 自检
+        //   GLINT_UITEST=hotkey_settings → 快捷键录制控件状态与布局自检
         //   GLINT_UITEST=pin_restore    → 图钉、隐藏与恢复自检
         //   其它值 → 提问会话流程(走真实 API)
         if let mode = ProcessInfo.processInfo.environment["GLINT_UITEST"] {
@@ -2551,6 +2535,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.popup.runDemoClaudeUI()
                 } else if mode == "pin_restore" {
                     self.popup.runDemoPinRestore()
+                } else if mode == "hotkey_settings" {
+                    self.settings.show(tab: 0)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        let ok = self.settings.runHotKeyRecorderSmokeTest()
+                        let frame = self.settings.windowObject?.frame ?? .zero
+                        let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
+                        let snapshotPath = URL(fileURLWithPath: outDir)
+                            .appendingPathComponent("glint-hotkey-settings.png").path
+                        let snapshotOK = self.settings.writeWindowSnapshot(to: snapshotPath)
+                        logLine("UITEST hotkey_settings recorder=\(ok) snapshot=\(snapshotOK) path=\(snapshotPath) frame=\(frame)")
+                        if !(ok && snapshotOK) { exit(1) }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            NSApp.terminate(nil)
+                        }
+                    }
                 } else if mode == "settings" {
                     self.settings.show(tab: 0)
                     let win = self.settings.windowObject
@@ -2592,11 +2591,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupStatusItem()
 
-        // 全局热键 ⌃⌥E 触发截图解释(与划词监听互不依赖)
-        hotKey = HotKey(keyCode: UInt32(kVK_ANSI_E),
-                        modifiers: UInt32(controlKey | optionKey),
-                        id: 1) { [weak self] in
-            DispatchQueue.main.async { self?.onScreenshotExplain() }
+        // 可配置全局截图热键(默认 ⌃⌥E),与划词监听互不依赖。
+        hotKeyManager = ScreenshotHotKeyManager(
+            savedHotKey: AppConfig.shared.screenshotHotKey,
+            registrar: CarbonHotKeyRegistrar(logger: logLine),
+            persist: { AppConfig.shared.setScreenshotHotKey($0) },
+            onScreenshot: { [weak self] in
+                DispatchQueue.main.async { self?.onScreenshotExplain() }
+            }
+        )
+        if let manager = hotKeyManager {
+            logLine("HOTKEY startup effective=\(manager.effectiveHotKey.displayString) active=\(manager.hasActiveRegistration) error=\(String(describing: manager.startupRegistrationError))")
         }
 
         if AXIsProcessTrusted() {
@@ -2605,6 +2610,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             requestAccessibility()          // 弹一次系统授权提示
             startWaitingForAccessibility()  // 轮询,授权后自动建 tap
         }
+    }
+
+    func beginScreenshotHotKeyRecording(_ handler: @escaping (ScreenshotHotKey) -> Void) {
+        hotKeyManager?.beginRecording(handler)
+    }
+
+    func endScreenshotHotKeyRecording() {
+        hotKeyManager?.endRecording()
+    }
+
+    func applyScreenshotHotKey(_ hotKey: ScreenshotHotKey) -> ScreenshotHotKeyApplyResult {
+        guard let manager = hotKeyManager else { return .registrationFailed }
+        let result = manager.apply(hotKey)
+        logLine("HOTKEY apply candidate=\(hotKey.displayString) result=\(result) effective=\(manager.effectiveHotKey.displayString)")
+        refreshMenu()
+        return result
     }
 
     func startWaitingForAccessibility() {
@@ -2703,7 +2724,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if granted {
                 // 用户刚在系统弹窗里授权:本进程通常要重开 App 才真正生效
                 a.messageText = "屏幕录制权限已授予"
-                a.informativeText = "权限已开启。首次授予后通常需要重新打开 Glint 才会真正生效,然后再用 ⌃⌥E 截图提问。"
+                a.informativeText = "权限已开启。首次授予后通常需要重新打开 Glint 才会真正生效,然后再用 \(currentScreenshotHotKey.displayString) 截图提问。"
                 a.addButton(withTitle: "好的")
                 a.runModal()
             } else {

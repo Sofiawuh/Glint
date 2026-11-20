@@ -22,7 +22,7 @@ else
 fi
 
 echo "==> 1/5 编译 universal 二进制 (arm64 + x86_64) 与生成品牌图标 (Glint.icns)"
-SRCS="main.swift Geometry.swift Markdown.swift Screenshot.swift Config.swift Settings.swift BrandLogo.swift PopupLifecycle.swift"
+SRCS="main.swift Geometry.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift"
 swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 lipo -create -output /tmp/glint_uni /tmp/glint_arm64 /tmp/glint_x86
@@ -93,7 +93,7 @@ Glint 划词翻译 / 划词提问 / 截图提问 —— 安装 3 步
 用法:
  - 划词:任意 App 里选中一段文字 → 光标右下角冒出「翻译」「提问」:
    点「翻译」直接出译文;点「提问」将划选内容作为上下文暂存,输入你的 Prompt 后发送。
- - 截图提问:按 ⌃⌥E(Control+Option+E)→ 框选屏幕一块 → 将截图作为上下文暂存,输入你的 Prompt 后由多模态模型回答并支持继续追问。
+ - 截图提问:按全局快捷键(默认 ⌃⌥E,可在「设置… → 基础」直接录制修改)→ 框选屏幕一块 → 将截图作为上下文暂存,输入你的 Prompt 后由多模态模型回答并支持继续追问。
    首次用要再授「屏幕录制」:系统设置 → 隐私与安全性 → 屏幕录制 → 打开 Glint(授完重开一次 App)。
 
 排查:菜单栏 Glint 图标 →「设置… → 权限」看「辅助功能」「屏幕录制」是否都已授权。

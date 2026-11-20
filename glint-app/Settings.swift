@@ -93,6 +93,12 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     private let launchAtLoginCheck = NSButton(checkboxWithTitle: "在开机时启动", target: nil, action: nil)
     private let azureSummaryLabel = NSTextField(labelWithString: "")
+    private let hotKeyRecorder = HotKeyRecorderControl()
+    private let hotKeyStatusLabel = NSTextField(labelWithString: "")
+    private lazy var hotKeyRecordingCoordinator = ScreenshotHotKeyRecordingCoordinator(
+        beginRouting: { handler in gAppDelegate?.beginScreenshotHotKeyRecording(handler) },
+        endRouting: { gAppDelegate?.endScreenshotHotKeyRecording() }
+    )
 
     private let axStatusLabel = NSTextField(labelWithString: "")
     private let scrStatusLabel = NSTextField(labelWithString: "")
@@ -115,6 +121,38 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     var windowObject: NSWindow? { window }
 
+    func runHotKeyRecorderSmokeTest() -> Bool {
+        guard window != nil, currentTabIndex == 0 else { return false }
+        hotKeyRecorder.beginRecording()
+        let enteredRecording = hotKeyRecorder.isRecording
+        handleHotKeyRecordingDecision(.invalid)
+        let invalidStayedRecording = hotKeyRecorder.isRecording
+            && hotKeyStatusLabel.stringValue.contains("修饰键")
+        handleHotKeyRecordingDecision(.cancel)
+        let cancelled = !hotKeyRecorder.isRecording
+        let passed = enteredRecording && invalidStayedRecording && cancelled
+        if passed { hotKeyRecorder.beginRecording() }
+        return passed && hotKeyRecorder.isRecording
+    }
+
+    func writeWindowSnapshot(to path: String) -> Bool {
+        guard let content = window?.contentView else { return false }
+        content.layoutSubtreeIfNeeded()
+        content.wantsLayer = true
+        let oldBackground = content.layer?.backgroundColor
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        defer { content.layer?.backgroundColor = oldBackground }
+        guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { return false }
+        content.cacheDisplay(in: content.bounds, to: rep)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        do {
+            try png.write(to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     func show(tab: Int? = nil) {
         if window == nil { build() }
         loadFields()
@@ -128,6 +166,10 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     func selectTab(_ index: Int) {
         guard index >= 0, index < tabViews.count else { return }
+        if index != 0 {
+            hotKeyRecorder.cancelRecording()
+            hotKeyRecordingCoordinator.settingsDidSelectBasicTab(false)
+        }
         currentTabIndex = index
         for (i, button) in tabButtons.enumerated() { button.isSelected = i == index }
         for (i, view) in tabViews.enumerated() { view.isHidden = i != index }
@@ -203,6 +245,40 @@ final class SettingsController: NSObject, NSWindowDelegate {
         launchAtLoginCheck.action = #selector(onLaunchAtLoginToggled)
         launchAtLoginCheck.font = .systemFont(ofSize: 13)
 
+        hotKeyRecorder.onRecordingStateChanged = { [weak self] isRecording in
+            guard let self else { return }
+            if isRecording {
+                self.hotKeyStatusLabel.textColor = .secondaryLabelColor
+                self.hotKeyStatusLabel.stringValue = "按下组合键；Esc 取消，Delete 恢复默认"
+                self.hotKeyRecordingCoordinator.beginRecording { [weak self] hotKey in
+                    self?.hotKeyRecorder.receiveCurrentHotKey(hotKey)
+                }
+            } else {
+                self.hotKeyRecordingCoordinator.endRecording()
+            }
+        }
+        hotKeyRecorder.onDecision = { [weak self] decision in
+            self?.handleHotKeyRecordingDecision(decision)
+        }
+
+        hotKeyStatusLabel.font = .systemFont(ofSize: 11)
+        hotKeyStatusLabel.textColor = .secondaryLabelColor
+        hotKeyStatusLabel.lineBreakMode = .byTruncatingTail
+        hotKeyStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        hotKeyStatusLabel.widthAnchor.constraint(equalToConstant: 300).isActive = true
+
+        let hotKeyDescription = NSTextField(labelWithString: "框选截图；默认 ⌃⌥E")
+        hotKeyDescription.font = .systemFont(ofSize: 12)
+        hotKeyDescription.textColor = .secondaryLabelColor
+        let hotKeyControls = NSStackView(views: [hotKeyRecorder, hotKeyDescription])
+        hotKeyControls.orientation = .horizontal
+        hotKeyControls.spacing = 10
+        hotKeyControls.alignment = .centerY
+        let hotKeyStack = NSStackView(views: [hotKeyControls, hotKeyStatusLabel])
+        hotKeyStack.orientation = .vertical
+        hotKeyStack.spacing = 5
+        hotKeyStack.alignment = .leading
+
         azureSummaryLabel.font = .systemFont(ofSize: 13, weight: .medium)
         let configure = NSButton(title: "配置 Azure…", target: self, action: #selector(onGoToAzureTab))
         configure.bezelStyle = .rounded
@@ -211,13 +287,9 @@ final class SettingsController: NSObject, NSWindowDelegate {
         azureRow.orientation = .horizontal
         azureRow.spacing = 10
 
-        let hotkey = NSTextField(wrappingLabelWithString: "⌃⌥E（Control + Option + E）框选截图，划词后可直接翻译或提问。")
-        hotkey.font = .systemFont(ofSize: 13)
-        hotkey.preferredMaxLayoutWidth = 390
-
         return pageStack([
             prefRow(label: "启动", content: launchAtLoginCheck),
-            prefRow(label: "快捷键", content: hotkey, alignTop: true),
+            prefRow(label: "快捷键", content: hotKeyStack, alignTop: true),
             prefRow(label: "Azure", content: azureRow)
         ], top: 34)
     }
@@ -335,6 +407,13 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     private func loadFields() {
         let config = AppConfig.shared
+        hotKeyRecorder.setHotKey(gAppDelegate?.currentScreenshotHotKey ?? config.screenshotHotKey)
+        if let message = gAppDelegate?.screenshotHotKeyStartupMessage {
+            hotKeyStatusLabel.textColor = .systemOrange
+            hotKeyStatusLabel.stringValue = message
+        } else {
+            hotKeyStatusLabel.stringValue = ""
+        }
         translatorEndpointField.stringValue = config.translator.endpoint
         translatorKeyField.stringValue = config.translator.apiKey
         translatorRegionField.stringValue = config.translator.region
@@ -468,8 +547,70 @@ final class SettingsController: NSObject, NSWindowDelegate {
     @objc private func onGoToAzureTab() { selectTab(2) }
     @objc private func closeWin() { window?.close() }
 
+    private func handleHotKeyRecordingDecision(_ decision: ScreenshotHotKey.RecordingDecision) {
+        switch decision {
+        case .waitForKey:
+            return
+        case .invalid:
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = "请同时按下修饰键和一个按键"
+        case .cancel:
+            hotKeyRecorder.cancelRecording()
+            hotKeyStatusLabel.stringValue = ""
+        case .restoreDefault:
+            applyScreenshotHotKey(.default)
+        case .commit(let hotKey):
+            applyScreenshotHotKey(hotKey)
+        }
+    }
+
+    private func applyScreenshotHotKey(_ hotKey: ScreenshotHotKey) {
+        guard let delegate = gAppDelegate else {
+            hotKeyRecorder.cancelRecording()
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = "Glint 尚未完成启动，请稍后重试"
+            return
+        }
+        let result = delegate.applyScreenshotHotKey(hotKey)
+        let effective = delegate.currentScreenshotHotKey
+        hotKeyRecorder.finishRecording(with: effective)
+        switch result {
+        case .applied:
+            hotKeyStatusLabel.textColor = .systemGreen
+            hotKeyStatusLabel.stringValue = "✓ 已生效并保存"
+        case .unchanged:
+            hotKeyStatusLabel.textColor = .secondaryLabelColor
+            hotKeyStatusLabel.stringValue = "快捷键未更改"
+        case .invalid:
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = "该组合键不可用"
+        case .registrationFailed:
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = "无法注册，可能已被系统或其他应用占用"
+        case .persistenceFailed(let candidateCleanupFailed):
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = candidateCleanupFailed
+                ? "保存失败，请重新启动 Glint 后再试"
+                : "快捷键未保存，原快捷键仍然有效"
+        case .oldRegistrationInvalidationFailed(let rollbackFailed, let cleanupFailed):
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = (rollbackFailed || cleanupFailed)
+                ? "切换未完成，原快捷键仍有效；请重新启动 Glint"
+                : "无法停用原快捷键，本次修改已撤销"
+        case .modificationLocked:
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = "快捷键修改已锁定，请重新启动 Glint 后再试"
+        }
+    }
+
     func windowDidBecomeKey(_ notification: Notification) { refreshPermissions() }
+    func windowDidResignKey(_ notification: Notification) {
+        hotKeyRecorder.cancelRecording()
+        hotKeyRecordingCoordinator.settingsWindowDidResignKey()
+    }
     func windowWillClose(_ notification: Notification) {
+        hotKeyRecorder.cancelRecording()
+        hotKeyRecordingCoordinator.settingsWindowWillClose()
         translatorProbeGeneration += 1
         gptProbeGeneration += 1
         translatorProbeButton.isEnabled = true

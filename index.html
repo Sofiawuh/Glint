@@ -6,7 +6,7 @@
   <title>Glint — 划词即译 · 划词即解 · 截图即解 | 原生 macOS 桌面 AI 助手</title>
   <meta
     name="description"
-    content="划词优先的原生 macOS 桌面 AI 助手。划词翻译、深度解释、多轮追问、⌃⌥E 截图讲解一次完成，自带 API Key 直连主流模型服务商，不用切换应用，不打断阅读心流。"
+    content="划词优先的原生 macOS 桌面 AI 助手。划词翻译、深度解释、多轮追问、默认 ⌃⌥E 截图讲解一次完成；快捷键可在设置中修改，自带 API Key 直连主流模型服务商。"
   />
   <link rel="icon" type="image/svg+xml" href="images/logo.svg" />
   <link rel="apple-touch-icon" href="images/logo.svg" />
@@ -1044,10 +1044,10 @@
 
       <p class="hero-subtitle">
         <span data-lang="zh">
-          划词优先的原生 macOS 桌面 AI 助手。翻译、深度解释、多轮追问、<code>⌃⌥E</code> 截图讲解一次完成 —— 不用切换窗口，不打断阅读心流。
+          划词优先的原生 macOS 桌面 AI 助手。翻译、深度解释、多轮追问、截图讲解一次完成；默认快捷键为 <code>⌃⌥E</code>，可在设置中自定义，不用切换窗口。
         </span>
         <span data-lang="en">
-          A selection-first native macOS AI assistant. Instant translation, deep explanation, follow-up dialogue, and <code>⌃⌥E</code> screenshot vision — without switching windows or breaking your reading flow.
+          A selection-first native macOS AI assistant. Instant translation, deep explanation, follow-up dialogue, and screenshot vision with the default <code>⌃⌥E</code> shortcut, which you can customize in Settings.
         </span>
       </p>
 
@@ -1115,8 +1115,8 @@
             <span class="traffic-light green"></span>
           </div>
           <span class="window-caption">
-            <span data-lang="zh">Glint — 划词翻译 · 划词解释 · ⌃⌥E 截图讲解</span>
-            <span data-lang="en">Glint — Select to Translate · Explain · ⌃⌥E Screenshot Vision</span>
+            <span data-lang="zh">Glint — 划词翻译 · 划词解释 · 默认 ⌃⌥E 截图讲解</span>
+            <span data-lang="en">Glint — Select to Translate · Explain · Default ⌃⌥E Screenshot Vision</span>
           </span>
           <span style="width: 42px;"></span>
         </div>
@@ -1131,7 +1131,7 @@
           playsinline
           controls
         >
-          <img src="images/demo.gif" alt="Glint 演示：划词翻译、划词解释、⌃⌥E 截图讲解" />
+          <img src="images/demo.gif" alt="Glint 演示：划词翻译、划词解释、默认 ⌃⌥E 截图讲解" />
         </video>
       </div>
 
@@ -1233,8 +1233,8 @@
             </h3>
           </div>
           <p>
-            <span data-lang="zh">秒级直译快速扫清外文障碍；独立解释浮窗支持书卷风排版、多轮追问与 <code>⌃⌥E</code> 截图讲解。</span>
-            <span data-lang="en">Fast translation clears reading barriers, while the explanation window supports bookish formatting, follow-up chat, and <code>⌃⌥E</code> vision.</span>
+            <span data-lang="zh">秒级直译快速扫清外文障碍；独立解释浮窗支持书卷风排版、多轮追问与默认 <code>⌃⌥E</code> 截图讲解。</span>
+            <span data-lang="en">Fast translation clears reading barriers, while the explanation window supports bookish formatting, follow-up chat, and vision with the default <code>⌃⌥E</code> shortcut.</span>
           </p>
         </div>
 
@@ -1362,13 +1362,13 @@
           </div>
         </div>
 
-        <!-- Walkthrough 3: ⌃⌥E Screenshot Vision -->
+        <!-- Walkthrough 3: Configurable Screenshot Vision (default ⌃⌥E) -->
         <div class="walkthrough-row">
           <div class="walkthrough-visual">
             <div class="mock-surface" style="border-style: dashed; border-color: var(--terracotta);">
               <div style="font-family: var(--font-mono); font-size: 0.78rem; color: var(--terracotta); font-weight: 600; margin-bottom: 0.45rem;">
-                <span data-lang="zh">⌃⌥E · 框选屏幕区域看图</span>
-                <span data-lang="en">⌃⌥E · Drag-Select Screen Region</span>
+                <span data-lang="zh">默认 ⌃⌥E · 框选屏幕区域看图</span>
+                <span data-lang="en">Default ⌃⌥E · Drag-Select Screen Region</span>
               </div>
               <div style="font-family: var(--font-serif); font-weight: 700; color: var(--ink-strong); margin-bottom: 0.35rem;">
                 <span data-lang="zh">画面核心解读：多视角扩散架构图</span>
@@ -1381,17 +1381,17 @@
             </div>
           </div>
           <div class="walkthrough-copy">
-            <span class="step-number-pill">03 · SCREENSHOT VISION (⌃⌥E)</span>
+            <span class="step-number-pill">03 · SCREENSHOT VISION (DEFAULT ⌃⌥E)</span>
             <h3>
-              <span data-lang="zh">⌃⌥E 框选看图讲解</span>
-              <span data-lang="en">⌃⌥E Screenshot Vision</span>
+              <span data-lang="zh">默认 ⌃⌥E 框选看图讲解</span>
+              <span data-lang="en">Default ⌃⌥E Screenshot Vision</span>
             </h3>
             <p>
               <span data-lang="zh">
-                遇到无法选中的报错弹窗、架构图或论文公式？按下 <code>⌃⌥E</code> 框选任意区域，多模态模型即刻看图精讲。
+                遇到无法选中的报错弹窗、架构图或论文公式？按下默认 <code>⌃⌥E</code> 框选任意区域，多模态模型即刻看图精讲。
               </span>
               <span data-lang="en">
-                Press <code>⌃⌥E</code> to drag-select any screen region. Multimodal models unpack architecture diagrams, error popups, or formulas immediately.
+                Press the default <code>⌃⌥E</code> shortcut to drag-select any screen region. Customize it in Settings whenever needed.
               </span>
             </p>
           </div>
