@@ -11,6 +11,31 @@ struct SelectionProbe: Equatable {
     let releasePointInQuartz: CGPoint
 }
 
+enum SelectionProbeOrigin: Equatable {
+    case focusedElement
+    case hitElement
+    case focusedAncestor(depth: Int)
+    case hitAncestor(depth: Int)
+}
+
+struct SelectionProbeCandidate: Equatable {
+    let origin: SelectionProbeOrigin
+    let role: String
+    let probe: SelectionProbe
+}
+
+enum SelectionEvidenceSource: Equatable {
+    case accessibility
+    case clipboardOnly
+}
+
+enum SelectionDeduplicationInvalidation: Equatable {
+    case escape
+    case ordinaryKey
+    case mouseDown
+    case sourceApplicationChanged
+}
+
 struct SelectionSnapshot: Equatable {
     let text: String
     let sourceApplication: String?
@@ -18,6 +43,32 @@ struct SelectionSnapshot: Equatable {
     let rangeFingerprint: String?
     let boundsInQuartz: CGRect?
     let releasePointInQuartz: CGPoint
+    let evidenceSource: SelectionEvidenceSource
+
+    init(
+        text: String,
+        sourceApplication: String?,
+        focusedElementIdentity: String?,
+        rangeFingerprint: String?,
+        boundsInQuartz: CGRect?,
+        releasePointInQuartz: CGPoint,
+        evidenceSource: SelectionEvidenceSource = .accessibility
+    ) {
+        self.text = text
+        self.sourceApplication = sourceApplication
+        self.focusedElementIdentity = focusedElementIdentity
+        self.rangeFingerprint = rangeFingerprint
+        self.boundsInQuartz = boundsInQuartz
+        self.releasePointInQuartz = releasePointInQuartz
+        self.evidenceSource = evidenceSource
+    }
+}
+
+struct ClipboardFallbackCapture: Equatable {
+    let changeCountBefore: Int
+    let changeCountAfter: Int
+    let text: String?
+    let types: [String]
 }
 
 enum KeyboardSelectionTrigger: Equatable {
@@ -111,6 +162,16 @@ struct SelectionObservationTracker {
         generation &+= 1
     }
 
+    mutating func invalidateClipboardOnlyDeduplication(
+        for reason: SelectionDeduplicationInvalidation
+    ) {
+        _ = reason
+        generation &+= 1
+        guard stableSelection?.evidenceSource == .clipboardOnly else { return }
+        stableSelection = nil
+        stableProbe = nil
+    }
+
     private mutating func accept(
         _ snapshot: SelectionSnapshot
     ) -> SelectionObservationDecision {
@@ -146,7 +207,12 @@ struct SelectionObservationTracker {
         _ lhs: SelectionSnapshot,
         _ rhs: SelectionSnapshot
     ) -> Bool {
-        lhs.text == rhs.text
+        if lhs.evidenceSource == .clipboardOnly || rhs.evidenceSource == .clipboardOnly {
+            return lhs.evidenceSource == rhs.evidenceSource
+                && lhs.text == rhs.text
+                && lhs.sourceApplication == rhs.sourceApplication
+        }
+        return lhs.text == rhs.text
             && lhs.sourceApplication == rhs.sourceApplication
             && lhs.focusedElementIdentity == rhs.focusedElementIdentity
             && lhs.rangeFingerprint == rhs.rangeFingerprint
@@ -167,6 +233,9 @@ enum SelectionSourceRevalidation {
         guard let expectedApplication = snapshot.sourceApplication,
               let currentApplication = currentSource.sourceApplication,
               expectedApplication == currentApplication else { return false }
+        if snapshot.evidenceSource == .clipboardOnly {
+            return true
+        }
         if let expectedElement = snapshot.focusedElementIdentity {
             return currentSource.focusedElementIdentity == expectedElement
         }
@@ -177,6 +246,9 @@ enum SelectionSourceRevalidation {
         snapshot: SelectionSnapshot,
         currentProbe: SelectionProbe?
     ) -> Bool {
+        if snapshot.evidenceSource == .clipboardOnly {
+            return false
+        }
         guard let currentProbe,
               isValid(
                 snapshot: snapshot,
@@ -207,6 +279,45 @@ enum SelectionDetectionOutcome: Equatable {
     case ignored
 }
 
+enum ClipboardRestorationPolicy {
+    struct CopyTransaction {
+        private let changeCountBeforeCopy: Int
+        private var observedCopyChangeCount: Int?
+        private var readTokenIsValid = true
+
+        init(changeCountBeforeCopy: Int) {
+            self.changeCountBeforeCopy = changeCountBeforeCopy
+        }
+
+        mutating func invalidateReadToken() {
+            readTokenIsValid = false
+        }
+
+        mutating func observePasteboardChange(changeCount: Int) -> Bool {
+            guard readTokenIsValid,
+                  observedCopyChangeCount == nil,
+                  changeCount != changeCountBeforeCopy else { return false }
+            observedCopyChangeCount = changeCount
+            return true
+        }
+
+        func shouldRestore(currentChangeCount: Int) -> Bool {
+            guard let observedCopyChangeCount else { return false }
+            return ClipboardRestorationPolicy.shouldRestore(
+                copiedChangeCount: observedCopyChangeCount,
+                currentChangeCount: currentChangeCount
+            )
+        }
+    }
+
+    static func shouldRestore(
+        copiedChangeCount: Int,
+        currentChangeCount: Int
+    ) -> Bool {
+        copiedChangeCount == currentChangeCount
+    }
+}
+
 enum SelectionDetection {
     private static let excludedRoles: Set<String> = [
         "AXScrollBar",
@@ -235,6 +346,124 @@ enum SelectionDetection {
         "AXLink",
     ]
 
+    private static let explicitNonTextRoles: Set<String> = [
+        "AXButton",
+        "AXCheckBox",
+        "AXRadioButton",
+        "AXMenu",
+        "AXMenuBar",
+        "AXMenuItem",
+        "AXImage",
+        "AXIcon",
+        "AXDisclosureTriangle",
+        "AXTabGroup",
+    ]
+
+    private static let preferredCandidateRoles: Set<String> = textRoles
+
+    private static let disallowedClipboardTypes: Set<String> = [
+        "public.file-url",
+        "nsfilenamespboardtype",
+        "public.image",
+        "public.png",
+        "public.tiff",
+        "public.jpeg",
+        "public.jpeg-2000",
+        "com.compuserve.gif",
+        "public.heic",
+        "public.heif",
+    ]
+
+    static func bestCandidate(
+        from candidates: [SelectionProbeCandidate]
+    ) -> SelectionProbeCandidate? {
+        candidates.enumerated().compactMap { index, candidate -> (Int, Int, SelectionProbeCandidate)? in
+            let text = candidate.probe.text?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !text.isEmpty, candidate.probe.rangeLength != 0 else { return nil }
+
+            let hasNonzeroRange = (candidate.probe.rangeLength ?? 0) > 0
+            let hasRangeFingerprint = candidate.probe.rangeFingerprint != nil
+            let hasBounds = candidate.probe.boundsInQuartz != nil
+            let evidenceRank: Int
+            if hasNonzeroRange && hasRangeFingerprint && hasBounds {
+                evidenceRank = 3
+            } else if hasNonzeroRange && (hasRangeFingerprint || hasBounds) {
+                evidenceRank = 2
+            } else {
+                evidenceRank = 1
+            }
+
+            let roleBonus = preferredCandidateRoles.contains(candidate.role) ? 1 : 0
+            let originBonus: Int
+            switch candidate.origin {
+            case .focusedElement:
+                originBonus = 400
+            case .hitElement:
+                originBonus = 300
+            case .focusedAncestor(let depth):
+                originBonus = max(0, 200 - depth)
+            case .hitAncestor(let depth):
+                originBonus = max(0, 100 - depth)
+            }
+            let tieRank = roleBonus * 10_000 + originBonus
+            return (evidenceRank, tieRank - index, candidate)
+        }.max { lhs, rhs in
+            if lhs.0 != rhs.0 { return lhs.0 < rhs.0 }
+            return lhs.1 < rhs.1
+        }?.2
+    }
+
+    static func allowsClipboardFallback(
+        clickCount: Int,
+        displacement: CGPoint,
+        pressedRolePath: [String],
+        releasedRolePath: [String]
+    ) -> Bool {
+        guard !containsExcludedRole(pressedRolePath),
+              !containsExcludedRole(releasedRolePath) else { return false }
+        if clickCount >= 2 { return true }
+        return hypot(displacement.x, displacement.y) >= 4.0
+    }
+
+    static func shouldAttemptClipboardFallback(
+        outcome: SelectionDetectionOutcome,
+        clickCount: Int,
+        displacement: CGPoint,
+        pressedRolePath: [String],
+        releasedRolePath: [String]
+    ) -> Bool {
+        guard outcome == .clipboardFallbackEligible else { return false }
+        return allowsClipboardFallback(
+            clickCount: clickCount,
+            displacement: displacement,
+            pressedRolePath: pressedRolePath,
+            releasedRolePath: releasedRolePath
+        )
+    }
+
+    static func clipboardOnlySnapshot(
+        capture: ClipboardFallbackCapture,
+        sourceApplication: String?,
+        focusedElementIdentity: String?,
+        releasePointInQuartz: CGPoint
+    ) -> SelectionSnapshot? {
+        guard capture.changeCountAfter != capture.changeCountBefore,
+              !containsDisallowedClipboardType(capture.types),
+              let rawText = capture.text else { return nil }
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return SelectionSnapshot(
+            text: text,
+            sourceApplication: sourceApplication,
+            focusedElementIdentity: focusedElementIdentity,
+            rangeFingerprint: nil,
+            boundsInQuartz: nil,
+            releasePointInQuartz: releasePointInQuartz,
+            evidenceSource: .clipboardOnly
+        )
+    }
+
     static func evaluate(
         before: SelectionProbe?,
         after: SelectionProbe,
@@ -251,9 +480,10 @@ enum SelectionDetection {
         }
 
         guard let rawText = after.text else {
-            return isTextSelectionPath(pressedRolePath) && isTextSelectionPath(releasedRolePath)
-                ? .clipboardFallbackEligible
-                : .ignored
+            return isExplicitNonTextPath(pressedRolePath)
+                || isExplicitNonTextPath(releasedRolePath)
+                ? .ignored
+                : .clipboardFallbackEligible
         }
 
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -266,6 +496,7 @@ enum SelectionDetection {
         let hasRangeEvidence = (after.rangeLength ?? 0) > 0
             || after.rangeFingerprint != nil
             || after.boundsInQuartz != nil
+        guard hasRangeEvidence else { return .clipboardFallbackEligible }
         let textChanged = before.map {
             ($0.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines) != text
         } ?? true
@@ -327,8 +558,28 @@ enum SelectionDetection {
         }
     }
 
+    private static func containsDisallowedClipboardType(_ types: [String]) -> Bool {
+        types.contains { rawType in
+            let type = rawType.lowercased()
+            return disallowedClipboardTypes.contains(type)
+                || type.contains("file-url")
+                || type.contains("filenamespboardtype")
+                || type.hasSuffix(".png")
+                || type.hasSuffix(".tiff")
+                || type.hasSuffix(".jpeg")
+                || type.hasSuffix(".jpg")
+                || type.hasSuffix(".gif")
+                || type.hasSuffix(".heic")
+                || type.hasSuffix(".heif")
+        }
+    }
+
     private static func isTextSelectionPath(_ roles: [String]) -> Bool {
         !roles.isEmpty && roles.contains(where: textRoles.contains)
+    }
+
+    private static func isExplicitNonTextPath(_ roles: [String]) -> Bool {
+        !roles.isEmpty && roles.contains(where: explicitNonTextRoles.contains)
     }
 
     private static func selectionEvidenceIsUnchanged(

@@ -28,7 +28,7 @@ flowchart LR
 ```
 
 - **主控与会话浮窗**（[glint-app/main.swift](../../glint-app/main.swift)）：负责应用生命周期（`AppDelegate`）、全局鼠标/键盘监听（`CGEventTap`）、翻译与流式对话网络请求（`translate` / `chatStream`）以及内容浮窗控制器（`PopupController`，管理紧凑提问卡片、内存上下文暂存与流式会话展开）。
-- **文本选区检测**（[glint-app/SelectionDetection.swift](../../glint-app/SelectionDetection.swift)、[glint-app/AccessibilitySelectionReader.swift](../../glint-app/AccessibilitySelectionReader.swift)）：鼠标释放、双击/三击、键盘扩选与 `⌘A` 后读取 AX 文本、范围和边界，通过 `SelectionObservationTracker` 对比稳定选区并使晚到观察失效；只有非空、非零、确实变化的文本选区才被接受。滚动条、Slider、Splitter、列/行头和调整柄直接排除，且不得进入剪贴板复制降级。
+- **文本选区检测**（[glint-app/SelectionDetection.swift](../../glint-app/SelectionDetection.swift)、[glint-app/AccessibilitySelectionReader.swift](../../glint-app/AccessibilitySelectionReader.swift)）：鼠标释放、双击/三击、键盘扩选与 `⌘A` 后，从焦点元素、释放点命中元素及双方有限父链收集 AX 文本、范围和边界候选，优先采用证据最完整的结果；AX 不完整时，只有明确拖选或双击/三击可进入受保护复制降级。`SelectionObservationTracker` 对比稳定选区并使晚到观察失效；滚动条、Slider、Splitter、列/行头和调整柄直接排除，文件 URL、文件列表和图片剪贴板类型也会被拒绝。
 - **选区微型入口**（[glint-app/SelectionEntryLifecycle.swift](../../glint-app/SelectionEntryLifecycle.swift)、[glint-app/SelectionEntryKeyboard.swift](../../glint-app/SelectionEntryKeyboard.swift)、[glint-app/SelectionEntryStyle.swift](../../glint-app/SelectionEntryStyle.swift)、[glint-app/SelectionEntryController.swift](../../glint-app/SelectionEntryController.swift)）：以独立可测试状态机管理 marker、悬停等待、展开和收回；marker 为附着于选区右下角的 10×10 pt 赤陶色方块，使用 22×22 pt 透明命中区；键盘策略区分内部模拟复制、Escape、扩选、全选和普通用户按键；专用 non-activating `NSPanel` 不激活 Glint，点击动作后才把不可变选区快照交给 `PopupController`。
 - **浮窗生命周期状态机**（[glint-app/PopupLifecycle.swift](../../glint-app/PopupLifecycle.swift)）：独立描述内容窗的 `visible`、`hiddenRestorable`、`dismissed` 状态，以及图钉、外部点击、菜单恢复和新划词替换规则；配套黑盒状态转换测试位于 [glint-app/popup_lifecycle_tests.swift](../../glint-app/popup_lifecycle_tests.swift)。
 - **几何定位模块**（[glint-app/Geometry.swift](../../glint-app/Geometry.swift)）：纯几何函数层，负责 Quartz/AppKit 坐标转换、选区右下角微型入口、展开胶囊、连续悬停命中区域和内容浮窗边界夹紧，不直接耦合 `NSScreen`/`NSEvent`，配套单测位于 [glint-app/geometry_tests.swift](../../glint-app/geometry_tests.swift)。
@@ -55,7 +55,12 @@ sequenceDiagram
     participant GPT as Azure OpenAI v1
 
     User->>Tap: 鼠标或键盘完成文本选择 或 按下截图快捷键(默认 ⌃⌥E)
-    Tap->>Selection: 读取 AX 选区、对比稳定快照并检查鼠标命中角色链
+    Tap->>Selection: 搜索焦点/命中元素及父链 AX 选区，并检查鼠标命中角色链
+    opt AX 信息不足且手势为明确拖选或双击/三击
+        Selection->>Extractor: 受保护地模拟复制，读取变更类型与所有权代次
+        Extractor->>Extractor: 仅在复制代次仍归本事务所有时恢复原剪贴板
+        Extractor-->>Selection: 返回非空纯文本或拒绝文件/图片对象
+    end
     Selection-->>Entry: 返回有效 SelectionSnapshot（无效/控件拖动静默忽略）
     Entry->>Geo: 计算选区右下角 marker、展开胶囊和连续命中区域
     Geo-->>Entry: 返回 SelectionEntryLayout
@@ -86,7 +91,7 @@ sequenceDiagram
 ## 3. 系统不变量与边界约束
 
 - **事件 Tap 零阻塞、代际作废与自愈约束**（[glint-app/main.swift](../../glint-app/main.swift)）：`CGEventTap` 回调严禁同步休眠或耗时阻塞；取词派发至专用串行后台队列以保护剪贴板快照恢复，每次新鼠标按下、用户键盘输入或前台应用切换都会使旧读取令牌失效，晚到结果不得复活旧入口；Glint 内部模拟 `⌘C` 必须携带专用来源标记并跳过自身失效逻辑；遇到 `.tapDisabledByTimeout` 必须立即自愈重开。
-- **选区证据与控件过滤约束**（[glint-app/SelectionDetection.swift](../../glint-app/SelectionDetection.swift)）：鼠标位移不是触发门槛，零位移释放、双击/三击和键盘操作均必须在 AX 证明形成新的非空、非零选区时才触发。任一按下/释放角色祖先属于滚动条、滑块、分隔条、列/行头或调整柄时都必须静默忽略，并禁止模拟 `⌘C`。剪贴板降级即使复制到非空文本，也必须另有 AX 范围或边界变化证据，否则 fail-closed。
+- **选区证据与控件过滤约束**（[glint-app/SelectionDetection.swift](../../glint-app/SelectionDetection.swift)）：完整 AX 选区优先；AX 不完整时，仅鼠标明确拖选或 `clickCount >= 2` 的双击/三击可模拟 `⌘C`，零位移单击不得降级；完整但未变化的旧 AX 选区必须保持 `.ignored`，不得借手势重新进入复制路径。任一按下/释放角色祖先属于滚动条、滑块、分隔条、列/行头或调整柄时必须静默忽略并禁止复制；复制必须产生新的 `changeCount`、包含非空纯文本且不含文件 URL、文件列表或图片类型。恢复前必须确认剪贴板仍处于本事务观察到的复制代次，外部更新代次优先保留。clipboard-only 结果只以文本与来源应用去重，没有 AX 边界时使用鼠标释放点定位；Escape、普通用户按键、外部鼠标按下或来源应用切换会清除其去重基线，使同一文本可被重新选择。
 - **入口不抢焦点、来源复验与悬停代际约束**（[glint-app/SelectionEntryLifecycle.swift](../../glint-app/SelectionEntryLifecycle.swift)、[glint-app/SelectionEntryKeyboard.swift](../../glint-app/SelectionEntryKeyboard.swift)、[glint-app/SelectionEntryController.swift](../../glint-app/SelectionEntryController.swift)）：入口展示不得调用 `NSApp.activate` 或 `makeKeyAndOrderFront`；初次出现时必须观察到鼠标先在入口外、再明确进入，才可启动 `180 ms` 展开计时。所有延迟回调必须携带代际令牌或绑定原始快照，旧选区不得展开、收回或关闭新入口；前台应用或焦点元素身份变化、外部点击和 Escape 立即使入口失效，其他用户按键在短延迟复验后仅于来源或选区确实变化时关闭。
 - **截图快捷键事务约束**（[glint-app/HotKey.swift](../../glint-app/HotKey.swift)）：候选快捷键在保存前必须保持未激活；注册、保存或旧键注销任一失败时，原快捷键继续执行截图。录制期间按当前快捷键只回填录制器，不触发截图。
 - **异步会话代际隔离约束**（[glint-app/main.swift](../../glint-app/main.swift)）：每次关闭浮窗、触发新划词或切换「翻译/解释」时，`generation` 令牌必须递增，所有在途的非流式/流式网络回调若 `gen != self.generation` 必须立即丢弃，严禁污染新浮窗。

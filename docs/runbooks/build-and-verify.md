@@ -13,6 +13,18 @@ harness run geometry-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DI
 # 文本选区证据与控件拖动过滤
 harness run selection-detection-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_detection_test" glint-app/SelectionDetection.swift glint-app/selection_detection_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_detection_test"'
 
+# 跨应用候选排序、未知角色拖选/双击降级和文件/图片剪贴板过滤
+harness run selection-compatibility-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_compatibility_test" glint-app/SelectionDetection.swift glint-app/selection_compatibility_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_compatibility_test"'
+
+# 旧 AX 选区不得因拖动或双击重新进入复制降级
+harness run selection-clipboard-fallback-regression-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_clipboard_fallback_regression_test" glint-app/SelectionDetection.swift glint-app/selection_clipboard_fallback_regression_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_clipboard_fallback_regression_test"'
+
+# 剪贴板恢复只能覆盖本事务自己的复制代次
+harness run clipboard-restoration-generation-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/clipboard_restoration_generation_test" glint-app/SelectionDetection.swift glint-app/clipboard_restoration_generation_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/clipboard_restoration_generation_test"'
+
+# clipboard-only 入口失效后允许重新选择同应用同文本
+harness run selection-clipboard-dedup-invalidation-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_clipboard_dedup_invalidation_test" glint-app/SelectionDetection.swift glint-app/selection_clipboard_dedup_invalidation_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_clipboard_dedup_invalidation_test"'
+
 # 微型入口悬停、展开、收回和代际令牌状态机
 harness run selection-entry-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_entry_lifecycle_test" glint-app/SelectionDetection.swift glint-app/SelectionEntryLifecycle.swift glint-app/selection_entry_lifecycle_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_entry_lifecycle_test"'
 
@@ -49,9 +61,12 @@ harness run carbon-hotkey-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$
 # 1. 编译 Universal 二进制并打包 Glint.app 与 Glint.dmg
 cd glint-app && bash build.sh 'Glint Self Signed'
 
-# 2. 停止运行中的进程、替换安装 /Applications/Glint.app 并重启
+# 2. 停止运行中的进程，将旧安装移动到临时备份目录，再替换并重启
 pkill -x Glint || true
-rm -rf /Applications/Glint.app
+GLINT_BACKUP_DIR="$(mktemp -d /tmp/glint-install-backup.XXXXXX)"
+if [ -d /Applications/Glint.app ]; then
+  mv /Applications/Glint.app "$GLINT_BACKUP_DIR/Glint.app"
+fi
 cp -R Glint.app /Applications/Glint.app
 codesign --verify --deep --strict --verbose=2 /Applications/Glint.app
 open /Applications/Glint.app
@@ -69,3 +84,4 @@ open /Applications/Glint.app
 - **运行状态与日志核查**：
   - 检查进程存活：`pgrep -fl /Applications/Glint.app/Contents/MacOS/Glint`
   - 检查运行日志：`tail -n 50 ~/.config/glint/glint.log`
+- **跨应用选区矩阵**：使用自行构造的非敏感测试文字，分别验证 Safari、Chrome、微信、企业微信、VS Code 和 TextEdit 的拖选与双击；同时验证网页/编辑器滚动条、消息列表滚动、Finder 桌面文件/图标与桌面拖框均不显示入口。日志只核对 `path`、`role`、`range`、`bounds` 等布尔信息，不得记录选中文字或剪贴板正文。
