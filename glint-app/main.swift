@@ -78,7 +78,9 @@ func primaryScreenHeight() -> CGFloat {
 // MARK: - 剪贴板取词降级（AX 选区读取见 AccessibilitySelectionReader.swift）
 
 // 全类型快照 + 完整恢复,避免污染用户剪贴板;轮询 changeCount 而非死等
-func selectedTextViaCopy() -> String? {
+func selectedTextViaCopy(
+    readIsCurrent: () -> Bool
+) -> ClipboardFallbackCapture {
     let pb = NSPasteboard.general
     let oldChange = pb.changeCount
 
@@ -95,6 +97,24 @@ func selectedTextViaCopy() -> String? {
             snapshot.append(copy)
         }
     }
+    if snapshot.isEmpty {
+        let copy = NSPasteboardItem()
+        for type in pb.types ?? [] {
+            if let data = pb.data(forType: type) {
+                copy.setData(data, forType: type)
+            }
+        }
+        if !copy.types.isEmpty { snapshot.append(copy) }
+    }
+
+    guard readIsCurrent() else {
+        return ClipboardFallbackCapture(
+            changeCountBefore: oldChange,
+            changeCountAfter: oldChange,
+            text: nil,
+            types: []
+        )
+    }
 
     // 2. 模拟 Cmd+C
     let src = CGEventSource(stateID: .combinedSessionState)
@@ -109,22 +129,51 @@ func selectedTextViaCopy() -> String? {
 
     // 3. 轮询等待剪贴板变化(最多 ~700ms),变化后再读
     var copied: String? = nil
+    var copiedTypes: [String] = []
+    var copiedChange = oldChange
+    var transaction = ClipboardRestorationPolicy.CopyTransaction(
+        changeCountBeforeCopy: oldChange
+    )
     for _ in 0..<35 {
         usleep(20_000)
-        if pb.changeCount != oldChange {
-            copied = pb.string(forType: .string)
-            break
+        let currentChange = pb.changeCount
+        guard currentChange != oldChange else {
+            if !readIsCurrent() { transaction.invalidateReadToken() }
+            continue
         }
+        if !readIsCurrent() {
+            transaction.invalidateReadToken()
+        }
+        if transaction.observePasteboardChange(changeCount: currentChange) {
+            copiedChange = currentChange
+            copied = pb.string(forType: .string)
+            var typeSet: Set<String> = []
+            for type in pb.types ?? [] {
+                typeSet.insert(type.rawValue)
+            }
+            for item in pb.pasteboardItems ?? [] {
+                for type in item.types {
+                    typeSet.insert(type.rawValue)
+                }
+            }
+            copiedTypes = typeSet.sorted()
+        }
+        break
     }
 
-    // 4. 恢复用户原剪贴板
-    if pb.changeCount != oldChange {
+    // 4. 仅当剪贴板仍处于本事务观察到的复制代次时恢复。
+    // 若用户或剪贴板管理器已经写入更新代次，必须保留其新内容。
+    if transaction.shouldRestore(currentChangeCount: pb.changeCount) {
         pb.clearContents()
         if !snapshot.isEmpty { pb.writeObjects(snapshot) }
     }
 
-    if let t = copied, !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return t }
-    return nil
+    return ClipboardFallbackCapture(
+        changeCountBefore: oldChange,
+        changeCountAfter: copiedChange,
+        text: copied,
+        types: copiedTypes
+    )
 }
 
 // MARK: - Azure Text Translation
@@ -2485,19 +2534,45 @@ func handleMouseUp(
             allowPresentation = true
             path = "ax"
         case .clipboardFallbackEligible:
+            let fallbackAllowed = SelectionDetection.shouldAttemptClipboardFallback(
+                outcome: evaluation.outcome,
+                clickCount: clickCount,
+                displacement: CGPoint(x: up.x - down.x, y: up.y - down.y),
+                pressedRolePath: press?.pressedRolePath ?? evaluation.releasedRolePath,
+                releasedRolePath: evaluation.releasedRolePath
+            )
+            guard fallbackAllowed else {
+                clipboardSnapshot = nil
+                allowPresentation = false
+                path = "ignored"
+                break
+            }
             guard DispatchQueue.main.sync(execute: {
                 gSelectionReadGate.accepts(readToken)
             }) else {
                 logLine("  skip: stale selection read before copy")
                 return
             }
-            let copied = selectedTextViaCopy()
-            clipboardSnapshot = copied.flatMap {
-                SelectionDetection.clipboardSnapshot(
-                    text: $0,
+            let capture = selectedTextViaCopy(readIsCurrent: {
+                DispatchQueue.main.sync {
+                    gSelectionReadGate.accepts(readToken)
+                }
+            })
+            let clipboardOnlySnapshot = SelectionDetection.clipboardOnlySnapshot(
+                capture: capture,
+                sourceApplication: evaluation.selectionEvidence.sourceApplication,
+                focusedElementIdentity: evaluation.selectionEvidence.focusedElementIdentity,
+                releasePointInQuartz: up
+            )
+            if let clipboardOnlySnapshot,
+               evaluation.clipboardEvidenceChanged {
+                clipboardSnapshot = SelectionDetection.clipboardSnapshot(
+                    text: clipboardOnlySnapshot.text,
                     selectionEvidence: evaluation.selectionEvidence,
-                    evidenceChanged: evaluation.clipboardEvidenceChanged
-                )
+                    evidenceChanged: true
+                ) ?? clipboardOnlySnapshot
+            } else {
+                clipboardSnapshot = clipboardOnlySnapshot
             }
             allowPresentation = clipboardSnapshot != nil
             path = clipboardSnapshot == nil ? "copy-failed" : "copy"
@@ -2542,9 +2617,13 @@ func handleUserKeyDown(
     if keyCode == 53 {
         gSelectionReadGate.invalidate()
         gSelectionObservationTracker.invalidatePendingObservations()
+        gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(for: .escape)
         gAppDelegate?.selectionEntry.escapePressed()
         return
     }
+
+    gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(for: .ordinaryKey)
+    gAppDelegate?.selectionEntry.invalidateClipboardOnlySelection()
 
     let readToken = gSelectionReadGate.beginRead()
     if let trigger = SelectionEntryKeyboardClassifier.selectionTrigger(
@@ -2635,6 +2714,7 @@ let gEventCallback: CGEventTapCallBack = { _, type, event, _ in
                 gSelectionPressContext = nil
                 return
             }
+            gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(for: .mouseDown)
             gSelectionPressContext = gSelectionReader.capturePress(at: loc)
         }
     } else if type == .leftMouseUp {
@@ -2906,6 +2986,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func frontmostApplicationDidChange(_ notification: Notification) {
         selectionEntry.revalidateSource(gSelectionReader.currentSourceIdentity())
+        gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(
+            for: .sourceApplicationChanged
+        )
         // 用户可能正用鼠标按下同时激活后台应用；此时不得使这次真实选区手势的读取令牌失效。
         guard gDownReadToken == nil else { return }
         gSelectionReadGate.invalidate()

@@ -160,6 +160,11 @@ final class SelectionEntryController: NSObject {
         renderCurrentPhase()
     }
 
+    func invalidateClipboardOnlySelection() {
+        guard lifecycle.currentSnapshot?.evidenceSource == .clipboardOnly else { return }
+        selectionInvalidated()
+    }
+
     func revalidateSource(_ currentSource: SelectionSourceIdentity) {
         guard let snapshot = lifecycle.currentSnapshot,
               !SelectionSourceRevalidation.isValid(

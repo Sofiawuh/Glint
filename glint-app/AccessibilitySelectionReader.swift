@@ -16,10 +16,17 @@ struct SelectionReadEvaluation {
 }
 
 final class AccessibilitySelectionReader {
+    private struct AccessibilityCandidate {
+        let element: AXUIElement
+        let origin: SelectionProbeOrigin
+        let role: String
+    }
+
     func capturePress(at quartzPoint: CGPoint) -> SelectionPressContext {
-        let roles = rolePath(at: quartzPoint)
+        let hit = element(at: quartzPoint)
+        let roles = rolePath(startingAt: hit)
         return SelectionPressContext(
-            before: focusedSelectionProbe(releasePoint: quartzPoint),
+            before: bestSelectionProbe(releasePoint: quartzPoint, hitElement: hit),
             pressedRolePath: roles
         )
     }
@@ -29,8 +36,9 @@ final class AccessibilitySelectionReader {
         at quartzPoint: CGPoint,
         previousProbe: SelectionProbe?
     ) -> SelectionReadEvaluation {
-        let releasedRoles = rolePath(at: quartzPoint)
-        let after = focusedSelectionProbe(releasePoint: quartzPoint)
+        let hit = element(at: quartzPoint)
+        let releasedRoles = rolePath(startingAt: hit)
+        let after = bestSelectionProbe(releasePoint: quartzPoint, hitElement: hit)
             ?? SelectionProbe(
                 text: nil,
                 sourceApplication: frontmostApplicationIdentity(),
@@ -41,7 +49,7 @@ final class AccessibilitySelectionReader {
                 releasePointInQuartz: quartzPoint
             )
         let outcome = SelectionDetection.evaluate(
-            before: nil,
+            before: press?.before ?? previousProbe,
             after: after,
             pressedRolePath: press?.pressedRolePath ?? releasedRoles,
             releasedRolePath: releasedRoles
@@ -53,7 +61,7 @@ final class AccessibilitySelectionReader {
             hasRange: after.rangeFingerprint != nil,
             hasBounds: after.boundsInQuartz != nil,
             clipboardEvidenceChanged: SelectionDetection.reliableSelectionEvidenceChanged(
-                before: previousProbe,
+                before: press?.before ?? previousProbe,
                 after: after
             )
         )
@@ -72,32 +80,72 @@ final class AccessibilitySelectionReader {
     }
 
     func currentSelectionProbe() -> SelectionProbe? {
-        focusedSelectionProbe(releasePoint: .zero)
+        bestSelectionProbe(releasePoint: .zero, hitElement: nil)
     }
 
-    private func focusedSelectionProbe(releasePoint: CGPoint) -> SelectionProbe? {
+    private func bestSelectionProbe(
+        releasePoint: CGPoint,
+        hitElement: AXUIElement?
+    ) -> SelectionProbe? {
         let systemWide = AXUIElementCreateSystemWide()
-        guard let focused = copyElementAttribute(
+        let focused = copyElementAttribute(
             kAXFocusedUIElementAttribute as CFString,
             from: systemWide
-        ) else { return nil }
+        )
+        let application = frontmostApplicationIdentity()
+        let candidates = accessibilityCandidates(
+            focusedElement: focused,
+            hitElement: hitElement
+        ).map { candidate in
+            SelectionProbeCandidate(
+                origin: candidate.origin,
+                role: candidate.role,
+                probe: selectionProbe(
+                    from: candidate.element,
+                    sourceApplication: application,
+                    releasePoint: releasePoint
+                )
+            )
+        }
+        if let best = SelectionDetection.bestCandidate(from: candidates) {
+            return best.probe
+        }
+        return candidates.filter {
+            ($0.probe.rangeLength ?? 0) > 0
+                || $0.probe.rangeFingerprint != nil
+                || $0.probe.boundsInQuartz != nil
+        }.max { lhs, rhs in
+            selectionEvidenceScore(lhs.probe) < selectionEvidenceScore(rhs.probe)
+        }?.probe
+    }
 
-        let text = copyAttribute(kAXSelectedTextAttribute as CFString, from: focused) as? String
+    private func selectionEvidenceScore(_ probe: SelectionProbe) -> Int {
+        ((probe.rangeLength ?? 0) > 0 ? 4 : 0)
+            + (probe.rangeFingerprint != nil ? 2 : 0)
+            + (probe.boundsInQuartz != nil ? 1 : 0)
+    }
+
+    private func selectionProbe(
+        from element: AXUIElement,
+        sourceApplication: String?,
+        releasePoint: CGPoint
+    ) -> SelectionProbe {
+        let text = copyAttribute(kAXSelectedTextAttribute as CFString, from: element) as? String
         let rawRangeValue = copyAttribute(
             kAXSelectedTextRangeAttribute as CFString,
-            from: focused
+            from: element
         )
         let rangeValue: AXValue? = rawRangeValue.flatMap {
             guard CFGetTypeID($0) == AXValueGetTypeID() else { return nil }
             return ($0 as! AXValue)
         }
         let range = rangeValue.flatMap(cfRange(from:))
-        let bounds = rangeValue.flatMap { boundsForRange($0, element: focused) }
+        let bounds = rangeValue.flatMap { boundsForRange($0, element: element) }
 
         return SelectionProbe(
             text: text,
-            sourceApplication: frontmostApplicationIdentity(),
-            focusedElementIdentity: elementIdentity(focused),
+            sourceApplication: sourceApplication,
+            focusedElementIdentity: elementIdentity(element),
             rangeLength: range.map { max(0, $0.length) },
             rangeFingerprint: range.map { "\($0.location):\($0.length)" },
             boundsInQuartz: bounds,
@@ -105,7 +153,48 @@ final class AccessibilitySelectionReader {
         )
     }
 
-    private func rolePath(at point: CGPoint) -> [String] {
+    private func accessibilityCandidates(
+        focusedElement: AXUIElement?,
+        hitElement: AXUIElement?
+    ) -> [AccessibilityCandidate] {
+        var result: [AccessibilityCandidate] = []
+        var seen: Set<String> = []
+
+        func append(_ element: AXUIElement?, origin: SelectionProbeOrigin) {
+            guard let element else { return }
+            let identity = elementIdentity(element)
+            guard seen.insert(identity).inserted else { return }
+            result.append(AccessibilityCandidate(
+                element: element,
+                origin: origin,
+                role: role(of: element)
+            ))
+        }
+
+        append(focusedElement, origin: .focusedElement)
+        append(hitElement, origin: .hitElement)
+
+        var focusedParent = focusedElement.flatMap {
+            copyElementAttribute(kAXParentAttribute as CFString, from: $0)
+        }
+        var hitParent = hitElement.flatMap {
+            copyElementAttribute(kAXParentAttribute as CFString, from: $0)
+        }
+        for depth in 1...8 {
+            append(focusedParent, origin: .focusedAncestor(depth: depth))
+            append(hitParent, origin: .hitAncestor(depth: depth))
+            focusedParent = focusedParent.flatMap {
+                copyElementAttribute(kAXParentAttribute as CFString, from: $0)
+            }
+            hitParent = hitParent.flatMap {
+                copyElementAttribute(kAXParentAttribute as CFString, from: $0)
+            }
+            if focusedParent == nil && hitParent == nil { break }
+        }
+        return result
+    }
+
+    private func element(at point: CGPoint) -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         var hit: AXUIElement?
         guard AXUIElementCopyElementAtPosition(
@@ -113,8 +202,11 @@ final class AccessibilitySelectionReader {
             Float(point.x),
             Float(point.y),
             &hit
-        ) == .success, let first = hit else { return [] }
+        ) == .success else { return nil }
+        return hit
+    }
 
+    private func rolePath(startingAt first: AXUIElement?) -> [String] {
         var result: [String] = []
         var current: AXUIElement? = first
         var depth = 0
@@ -130,6 +222,11 @@ final class AccessibilitySelectionReader {
             depth += 1
         }
         return result
+    }
+
+    private func role(of element: AXUIElement) -> String {
+        copyAttribute(kAXRoleAttribute as CFString, from: element) as? String
+            ?? "AXUnknown"
     }
 
     private func boundsForRange(_ rangeValue: AXValue, element: AXUIElement) -> CGRect? {
