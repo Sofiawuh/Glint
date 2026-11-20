@@ -7,11 +7,11 @@
 **划词即译 · 划词提问 · 截图提问 —— 原生丝滑的 macOS 桌面 AI 助手**
 
 选中文字，光标右下角即刻浮现「翻译 / 提问」；按下 ⌃⌥E 框选屏幕任意区域，将文字或截图暂存为上下文并输入你的 Prompt 发送给大模型。<br>
-自带 API Key **直连你选择的模型服务商**，无中间服务器、不中转、不收集任何数据。
+自带 API Key **直连你自己的 Azure 服务**，无中间服务器、不中转、不收集任何数据。
 
 ![macOS](https://img.shields.io/badge/macOS-12.0%2B%20Universal-141413?style=flat-square&logo=apple&logoColor=FAF9F5)
 ![Swift](https://img.shields.io/badge/Swift-5%20%7C%20AppKit-D97757?style=flat-square&logo=swift&logoColor=white)
-![Protocols](https://img.shields.io/badge/协议-OpenAI%20%7C%20Anthropic%20%7C%20Gemini-2D2D2A?style=flat-square)
+![Azure](https://img.shields.io/badge/Azure-Translator%20%7C%20OpenAI%20v1-0078D4?style=flat-square&logo=microsoftazure&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-3DA639?style=flat-square)
 
 <br>
@@ -27,16 +27,16 @@
 - **选中即出，随手即用** —— 在任意应用中用鼠标选中文字，快捷悬浮条即刻出现在光标右下角，无需手动复制或来回切换窗口。
 - **跨屏框选，看图精讲** —— 按下快捷键框选屏幕任意区域，无论是报错日志、架构图、论文公式还是外文界面，都能直接交由多模态模型为您拆解，并支持在面板底部连续追问。
 - **暖纸书卷风阅读体验** —— 采用柔和护眼的暖米白纸感界面与精细的富文本排版，流式输出实时呈现，浮窗随内容自然延展，让技术与长文阅读更加从容。
-- **多模型协议与主流服务商支持** —— 原生兼容 OpenAI、Gemini / Vertex AI 与 Anthropic 三大主流协议，内置 DeepSeek、Gemini、Vertex AI、MiMo 官方预设，并支持自由接入任意自定义网关。
-- **纯粹原生，本机直连** —— 采用纯原生 Swift 与 AppKit 构建，轻量流畅且无第三方框架负担；所有配置与密钥仅保存在本机，划词与截图内容仅在主动触发时直发您选择的模型服务商。
+- **Azure 双服务分工** —— 普通划词翻译调用 Azure Text Translation；上下文提问、多轮追问与截图理解调用 Azure OpenAI 新版 `/openai/v1/`。
+- **纯粹原生，本机直连** —— 采用纯原生 Swift 与 AppKit 构建，轻量流畅且无第三方框架负担；所有配置与密钥仅保存在本机，内容仅在主动触发时直发你的 Azure 资源。
 
 | 交互场景 | 触发方式 | 行为说明 |
 | :--- | :--- | :--- |
-| **划词翻译** | 选中文本 → 点击 **「翻译」** | 自动识别源语言并译为设置中选定的目标语言（默认简体中文） |
+| **划词翻译** | 选中文本 → 点击 **「翻译」** | Azure Translator 自动识别源语言；中文译英文，其他语言译简体中文 |
 | **划词提问** | 选中文本 → 点击 **「提问」** | 将选中内容暂存内存并弹出紧凑输入框，输入非空 Prompt 后连同上下文流式提问 |
 | **多轮追问** | 会话浮窗底部输入框 → 回车 | 围绕当前选中文本或截图内容继续深入提问 |
 | **截图提问** | 按下 ⌃⌥E → 框选区域 | 将框选画面暂存内存并弹出输入框，输入自定义 Prompt 后由多模态模型回答 |
-| **语言与提示词** | 菜单栏图标 → **「设置… → 语言」** | 统一设置翻译目标语言与自定义翻译 Prompt |
+| **连接探测** | 菜单栏图标 → **「设置… → Azure」** | 分别测试 Translator 与 Azure GPT 的 Endpoint、Key、Region 和部署名称 |
 
 ## Get started
 
@@ -46,12 +46,14 @@
      ```bash
      cd glint-app && bash build.sh
      ```
-2. **配置模型服务商与 API Key**
-   - 点击屏幕右上角菜单栏 **Glint 图标** → **「设置…」** → **「服务商」**。
-   - 在下拉框中直接选择内置服务商（[DeepSeek](https://platform.deepseek.com/) / [Gemini](https://aistudio.google.com/) / [Vertex AI](https://cloud.google.com/vertex-ai) / [MiMo](https://platform.xiaomimimo.com/)）或点击「新增自定义…」，填入 API Key 并点击 **「保存」** 即可立即生效。
+2. **配置 Azure 服务**
+   - 点击屏幕右上角菜单栏 **Glint 图标** → **「设置…」** → **「Azure」**。
+   - **Azure Text Translation**：填写 Translator Endpoint、API Key 与 Region（全局单服务资源可留空 Region）。
+   - **Azure GPT**：填写形如 `https://<resource>.openai.azure.com/openai/v1` 的 Endpoint、API Key 与 Azure Deployment Name；部署支持图片时勾选截图能力。
+   - 两组配置都可先点 **「测试连接」** 验证当前输入，再点击 **「保存」**。
 3. **开启系统权限与开机自启**
    - 在 **「设置… → 权限」** 页开启 **「辅助功能」**（全局划词监听必需）与 **「屏幕录制」**（截图解释必需）。
-   - 在 **「设置… → 基础」** 页可勾选 **「在开机时启动」**，并查看当前激活的服务商与快捷键概览。
+   - 在 **「设置… → 基础」** 页可勾选 **「在开机时启动」**，并查看 Azure 配置概览。
 
 ## Learn more
 
@@ -61,6 +63,6 @@
   - [构建、安装与自验收手册 (docs/runbooks/build-and-verify.md)](docs/runbooks/build-and-verify.md)
 - **架构决策记录 (ADR)**：
   - [ADR-0001：划词气泡与浮窗固定锚定于鼠标光标右下角](docs/adr/0001-cursor-bottom-right-placement.md)
-  - [ADR-0002：多协议模型适配层与四大官方服务商预设方案](docs/adr/0002-multi-provider-protocol-adapter.md)
+  - [ADR-0003：Azure Translator 与 Azure OpenAI v1 专用双服务架构](docs/adr/0003-azure-only-services.md)
 - **版本与开源协议**：
   - [版本变更记录 (CHANGELOG.md)](CHANGELOG.md) · 基于 [MIT License](LICENSE) 开源。

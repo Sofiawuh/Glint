@@ -45,11 +45,13 @@
 
 配置继续写入 `~/.config/glint/config.json`。本次不引入 Keychain，不迁移旧多服务商配置，也不保证旧配置字段继续生效。源码、测试、文档、日志和 Git 历史不得包含真实凭据。
 
+首次发现旧版或不可解码的 `config.json` 时，应用必须先原样备份为同目录 `config.pre-azure-backup.json`，且不得覆盖已经存在的备份，然后再写入 Azure 默认配置。
+
 ## 4. 内部边界
 
 - `AzureTranslatorConfig` 负责 Translator 连接信息、目标语言判断、请求构造与响应解析。
 - `AzureOpenAIConfig` 负责 Azure OpenAI v1 Endpoint 规范化、请求构造、非流式解析和 SSE 增量解析。
-- `AppConfig` 聚合并持久化上述两组配置以及现有提示词等本地偏好。
+- `AppConfig` 聚合并持久化上述两组 Azure 配置。
 - `translate` 仅调用 Translator；`chatStream` 与截图会话仅调用 Azure OpenAI。
 - 网络错误解析统一提取 Azure JSON 错误中的 `error.code` 与 `error.message`，不得回显 API Key 或 Authorization 信息。
 - Translator 连接测试发送最小真实翻译请求，将固定文本 `test` 翻译为简体中文；Azure GPT 连接测试发送非流式最小对话并验证能够解析回复。测试会产生极少量真实 Azure 调用。
@@ -57,7 +59,7 @@
 
 ## 5. 失败模式
 
-- Endpoint、Key、Region 或 Deployment Name 为空时，在发请求前直接提示具体缺失项。
+- Translator 的 Endpoint/Key 或 GPT 的 Endpoint/Key/Deployment Name 为空时，在发请求前提示检查对应必填项。
 - Endpoint 无法构成 HTTPS URL 时拒绝请求。
 - Translator Region 允许为空，以兼容全局单服务资源；用户填写时发送 `Ocp-Apim-Subscription-Region`。
 - HTTP 非 2xx 时解析 Azure 错误正文；正文不可解析时显示状态码与通用建议。
