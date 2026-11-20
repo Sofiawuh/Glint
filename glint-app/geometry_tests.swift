@@ -28,6 +28,13 @@ struct GeoTests {
             && r.maxY <= safe.maxY + 0.5
     }
 
+    static func insideVisibleFrame(_ r: NSRect, visible vf: CGRect) -> Bool {
+        r.minX >= vf.minX - 0.5
+            && r.maxX <= vf.maxX + 0.5
+            && r.minY >= vf.minY - 0.5
+            && r.maxY <= vf.maxY + 0.5
+    }
+
     static func main() {
         let vf = NSRect(x: 0, y: 0, width: 1800, height: 1100)
         let bubbleW: CGFloat = 152
@@ -182,6 +189,133 @@ struct GeoTests {
                 && approx(qSubTop.width, 200)
                 && approx(qSubTop.height, 150),
                "左侧不等高副屏高于主屏顶部区域框选转换: localRect(100,1250,200,150) → Quartz(-2460,-167,200,150)")
+
+        // —— 11. 文本选区入口：10×10 可见方块中心与选区 AppKit 右下角重合 ——
+        let markerSize = NSSize(width: 10, height: 10)
+        let expandedSize = NSSize(width: 152, height: 34)
+        let selectionBounds = NSRect(x: 300, y: 420, width: 180, height: 44)
+        let selectionBottomRight = NSPoint(x: selectionBounds.maxX, y: selectionBounds.minY)
+        let entryNormal = selectionEntryLayout(
+            selectionBounds: selectionBounds,
+            releasePoint: NSPoint(x: 305, y: 462),
+            visible: vf,
+            markerSize: markerSize,
+            expandedSize: expandedSize
+        )
+        expect(approx(entryNormal.markerFrame.midX, selectionBottomRight.x)
+                && approx(entryNormal.markerFrame.midY, selectionBottomRight.y)
+                && approx(entryNormal.markerFrame.width, 10)
+                && approx(entryNormal.markerFrame.height, 10)
+                && insideVisibleFrame(entryNormal.markerFrame, visible: vf),
+               "test_selection_entry_marker_center_matches_selection_bottom_right")
+
+        // —— 12. 透明命中区为 22×22，默认与同一角点同心 ——
+        expect(approx(entryNormal.markerHitFrame.midX, selectionBottomRight.x)
+                && approx(entryNormal.markerHitFrame.midY, selectionBottomRight.y)
+                && approx(entryNormal.markerHitFrame.width, 22)
+                && approx(entryNormal.markerHitFrame.height, 22)
+                && entryNormal.markerHitFrame.contains(
+                    NSPoint(x: entryNormal.markerFrame.midX, y: entryNormal.markerFrame.midY)
+                ),
+               "test_selection_entry_marker_has_22_point_transparent_hit_frame")
+
+        let entryReverseDrag = selectionEntryLayout(
+            selectionBounds: selectionBounds,
+            releasePoint: NSPoint(x: selectionBounds.minX, y: selectionBounds.maxY),
+            visible: vf,
+            markerSize: markerSize,
+            expandedSize: expandedSize
+        )
+        expect(entryReverseDrag.markerFrame == entryNormal.markerFrame,
+               "test_reverse_drag_uses_selection_bounds_instead_of_release_endpoint")
+
+        // —— 13. 右边缘向屏内偏置，仍接触同一右下角，绝不翻到选区左下侧 ——
+        let rightEdgeSelection = NSRect(x: 1720, y: 500, width: 78, height: 28)
+        let rightEdgeCorner = NSPoint(x: rightEdgeSelection.maxX, y: rightEdgeSelection.minY)
+        let entryInsetFromRight = selectionEntryLayout(
+            selectionBounds: rightEdgeSelection,
+            releasePoint: rightEdgeCorner,
+            visible: vf,
+            markerSize: markerSize,
+            expandedSize: expandedSize
+        )
+        expect(approx(entryInsetFromRight.markerFrame.maxX, rightEdgeCorner.x)
+                && entryInsetFromRight.markerFrame.minY <= rightEdgeCorner.y
+                && entryInsetFromRight.markerFrame.maxY >= rightEdgeCorner.y
+                && entryInsetFromRight.markerFrame.minX > rightEdgeSelection.midX
+                && insideVisibleFrame(entryInsetFromRight.markerFrame, visible: vf)
+                && insideVisibleFrame(entryInsetFromRight.markerHitFrame, visible: vf),
+               "test_selection_entry_right_edge_insets_around_same_corner_without_left_flip")
+
+        // —— 14. 底边缘向屏内偏置，方块下边仍接触选区右下角 ——
+        let bottomSelection = NSRect(x: 700, y: 72, width: 120, height: 30)
+        let bottomCorner = NSPoint(x: bottomSelection.maxX, y: bottomSelection.minY)
+        let entryAboveDock = selectionEntryLayout(
+            selectionBounds: bottomSelection,
+            releasePoint: bottomCorner,
+            visible: vfWithDock,
+            markerSize: markerSize,
+            expandedSize: expandedSize
+        )
+        expect(approx(entryAboveDock.markerFrame.minY, bottomCorner.y)
+                && entryAboveDock.markerFrame.minX <= bottomCorner.x
+                && entryAboveDock.markerFrame.maxX >= bottomCorner.x
+                && insideVisibleFrame(entryAboveDock.markerFrame, visible: vfWithDock)
+                && insideVisibleFrame(entryAboveDock.markerHitFrame, visible: vfWithDock)
+                && insideSafeArea(entryAboveDock.expandedFrame, visible: vfWithDock),
+               "test_selection_entry_bottom_edge_insets_around_same_corner")
+
+        // —— 15. 负坐标外接屏保持同一中心锚点和命中尺寸 ——
+        let negativeSelection = NSRect(x: -2200, y: 300, width: 210, height: 48)
+        let negativeCorner = NSPoint(x: negativeSelection.maxX, y: negativeSelection.minY)
+        let entryNegativeScreen = selectionEntryLayout(
+            selectionBounds: negativeSelection,
+            releasePoint: NSPoint(x: -2190, y: 340),
+            visible: vfLeftMonitor,
+            markerSize: markerSize,
+            expandedSize: expandedSize
+        )
+        expect(approx(entryNegativeScreen.markerFrame.midX, negativeCorner.x)
+                && approx(entryNegativeScreen.markerFrame.midY, negativeCorner.y)
+                && approx(entryNegativeScreen.markerHitFrame.width, 22)
+                && approx(entryNegativeScreen.markerHitFrame.height, 22)
+                && entryNegativeScreen.markerFrame.maxX < 0
+                && entryNegativeScreen.expandedFrame.maxX < 0
+                && insideVisibleFrame(entryNegativeScreen.markerFrame, visible: vfLeftMonitor)
+                && insideSafeArea(entryNegativeScreen.expandedFrame, visible: vfLeftMonitor),
+               "test_selection_entry_stays_on_negative_coordinate_display")
+
+        // —— 16. 展开胶囊独立选择方向，不改变方块的右下角锚点 ——
+        expect(entryNormal.expansionDirection == .left
+                && approx(entryNormal.markerFrame.midX, selectionBottomRight.x)
+                && approx(entryNormal.markerFrame.midY, selectionBottomRight.y),
+               "test_selection_entry_expands_left_when_space_is_available")
+
+        let leftEdgeSelection = NSRect(x: 8, y: 600, width: 32, height: 24)
+        let entryExpandsRight = selectionEntryLayout(
+            selectionBounds: leftEdgeSelection,
+            releasePoint: NSPoint(x: leftEdgeSelection.maxX, y: leftEdgeSelection.minY),
+            visible: vf,
+            markerSize: markerSize,
+            expandedSize: expandedSize
+        )
+        expect(entryExpandsRight.expansionDirection == .right
+                && insideSafeArea(entryExpandsRight.expandedFrame, visible: vf),
+               "test_selection_entry_expands_right_when_left_side_has_no_space")
+
+        // —— 17. 入口命中区、胶囊及两者间隙形成连续命中区域 ——
+        let bridgePoint = NSPoint(
+            x: (entryNormal.expandedFrame.maxX + entryNormal.markerFrame.minX) / 2,
+            y: entryNormal.markerFrame.midY
+        )
+        expect(entryNormal.continuousHitRegion.contains(
+                    NSPoint(x: entryNormal.markerHitFrame.midX, y: entryNormal.markerHitFrame.midY)
+                )
+                && entryNormal.continuousHitRegion.contains(
+                    NSPoint(x: entryNormal.expandedFrame.midX, y: entryNormal.expandedFrame.midY)
+                )
+                && entryNormal.continuousHitRegion.contains(bridgePoint),
+               "test_selection_entry_continuous_hit_region_bridges_marker_and_actions")
 
         print(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")
         exit(failures == 0 ? 0 : 1)
