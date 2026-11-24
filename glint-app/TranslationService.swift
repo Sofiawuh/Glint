@@ -54,7 +54,7 @@ enum TranslationServiceError: LocalizedError, Equatable {
         case .service(let message):
             return message
         case .invalidResponse:
-            return "服务返回解析失败，请稍后重试"
+            return "Azure GPT 返回内容不完整或格式异常，已保留处理前内容"
         case .validationFailed:
             return "AI 处理结果可能改动受保护内容，已保留处理前内容"
         case .cancelled:

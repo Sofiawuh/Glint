@@ -24,11 +24,8 @@ enum TranslationBlockRenderer {
         case .paragraph(let text):
             output.append(NSAttributedString(string: text, attributes: bodyAttributes()))
         case .keyPoints(let items):
-            let lines = items.map { item in
-                hasExistingListMarker(item) ? item : "• \(item)"
-            }
             output.append(NSAttributedString(
-                string: lines.joined(separator: "\n"),
+                string: items.joined(separator: "\n"),
                 attributes: keyPointAttributes()
             ))
         case .quote(let text):
@@ -127,10 +124,4 @@ enum TranslationBlockRenderer {
         ]
     }
 
-    private static func hasExistingListMarker(_ text: String) -> Bool {
-        text.range(
-            of: #"^\s*(?:[-*+•◦▪‣–]|\d+[.)])\s+"#,
-            options: .regularExpression
-        ) != nil
-    }
 }
