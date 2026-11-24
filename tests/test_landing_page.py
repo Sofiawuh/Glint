@@ -2,6 +2,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 import re
 import unittest
+from typing import Optional
 from urllib.parse import urlparse
 
 
@@ -25,7 +26,7 @@ class _LandingPageDocumentParser(HTMLParser):
         if decl.strip().lower().startswith("doctype html"):
             self.has_doctype = True
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         lowered_tag = tag.lower()
         self.tags.append(lowered_tag)
         attr_map = {k.lower(): (v or "") for k, v in attrs}
@@ -78,12 +79,12 @@ class _WalkthroughVisualParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self._stack: list[tuple[str, dict[str, str]]] = []
-        self._walkthrough_section_depth: int | None = None
-        self._current_card_depth: int | None = None
-        self._current_card: dict[str, object] | None = None
+        self._walkthrough_section_depth: Optional[int] = None
+        self._current_card_depth: Optional[int] = None
+        self._current_card: Optional[dict[str, object]] = None
         self.cards: list[dict[str, object]] = []
 
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
         lowered_tag = tag.lower()
         attr_map = {k.lower(): (v or "") for k, v in attrs}
 
@@ -261,7 +262,7 @@ class TestLandingPage(unittest.TestCase):
             "index.html must include a meta description tag",
         )
         description_text = " ".join(description_contents)
-        for keyword in ("划词", "翻译", "解释"):
+        for keyword in ("选中文字", "翻译", "提问"):
             self.assertIn(
                 keyword,
                 description_text,
@@ -310,27 +311,23 @@ class TestLandingPage(unittest.TestCase):
     ) -> None:
         content, parser = self._load_and_parse()
 
-        # 1. Hero section & AI providers
+        # 1. Hero section & Azure services
         self.assertIn("选中", content, "Hero headline must mention '选中'")
         self.assertTrue(
             "即刻响应" in content or "即译" in content,
             "Hero headline must mention '即刻响应' or '即译'",
         )
-        releases_url = "https://github.com/nanzhi84/Glint/releases"
+        releases_url = "https://github.com/Sofiawuh/Glint/releases"
         self.assertTrue(
             any(releases_url in href for href in parser.links) or releases_url in content,
             f"Hero section must link to GitHub Releases ({releases_url})",
         )
-        for provider in ("OpenAI", "Gemini", "Vertex AI", "DeepSeek", "MiMo"):
+        for service in ("Azure Translator", "Azure GPT", "Azure Speech"):
             self.assertIn(
-                provider,
+                service,
                 content,
-                f"Landing page must showcase supported AI provider '{provider}'",
+                f"Landing page must showcase required Azure service '{service}'",
             )
-        self.assertTrue(
-            "Anthropic" in content or "Claude" in content,
-            "Landing page must showcase Anthropic / Claude compatibility",
-        )
 
         # 2. Why Glint section
         self.assertIn(
@@ -365,9 +362,10 @@ class TestLandingPage(unittest.TestCase):
             content,
             "Product Walkthrough must document the default screenshot explain shortcut '⌃⌥E'",
         )
-        self.assertTrue(
-            "服务商" in content or "厂商" in content,
-            "Product Walkthrough must cover multi-provider settings",
+        self.assertIn(
+            "Azure",
+            content,
+            "Product Walkthrough must cover Azure service settings",
         )
         self.assertIn(
             "语言",
@@ -446,7 +444,7 @@ class TestLandingPage(unittest.TestCase):
             "Header GitHub link must not use rounded pill card class .header-github-btn",
         )
 
-        # 3. Mainstream AI providers showcase uses real official high-res icons from Settings.swift
+        # 3. Public copy matches the Azure-only runtime architecture.
         self.assertFalse(
             "provider-dot" in content,
             "Providers list must not use .provider-dot colored dots",
@@ -461,39 +459,17 @@ class TestLandingPage(unittest.TestCase):
             "index.html must contain a .providers-list container",
         )
         providers_html = providers_match.group(1) if providers_match else ""
-        providers_img_count = len(
-            re.findall(r"<img\b", providers_html, flags=re.IGNORECASE)
-        )
-        self.assertGreaterEqual(
-            providers_img_count,
-            6,
-            f".providers-list must include at least 6 <img> provider icons (official app icons + OpenAI & Claude), found {providers_img_count}",
-        )
-
-        self.assertTrue(
-            SETTINGS_SWIFT_PATH.is_file(),
-            f"Missing Settings.swift at {SETTINGS_SWIFT_PATH}",
-        )
-        settings_swift_text = SETTINGS_SWIFT_PATH.read_text(encoding="utf-8")
-        for icon_const in (
-            "kIcon_deepseek",
-            "kIcon_gemini",
-            "kIcon_vertexai",
-            "kIcon_xiaomi",
-        ):
-            const_match = re.search(
-                rf'static\s+let\s+{icon_const}\s*=\s*"([^"]+)"',
-                settings_swift_text,
+        for service in ("Azure Translator", "Azure GPT", "Azure Speech"):
+            self.assertIn(
+                service,
+                providers_html,
+                f".providers-list must document the Azure-only service role {service}",
             )
-            self.assertIsNotNone(
-                const_match,
-                f"Expected {icon_const} Base64 definition in Settings.swift",
-            )
-            icon_b64 = const_match.group(1) if const_match else ""
-            # Check prefix (64 chars) and payload slice (first 200 chars, where IDAT chunks diverge)
-            self.assertTrue(
-                icon_b64[:64] in providers_html and icon_b64[:200] in providers_html,
-                f".providers-list must embed official {icon_const} Base64 icon from Settings.swift",
+        for retired_provider in ("DeepSeek", "Gemini", "Vertex AI", "MiMo", "Claude"):
+            self.assertNotIn(
+                retired_provider,
+                providers_html,
+                f"Azure-only landing page must not advertise retired provider {retired_provider}",
             )
 
         # 4. Concise Why Glint 2x2 feature card descriptions (20 to 62 non-whitespace Chinese chars)
@@ -704,13 +680,13 @@ class TestLandingPage(unittest.TestCase):
             ("Translate", "Explain"),
             ("Enter",),
             ("⌃⌥E",),
-            ("Providers", "11"),
+            ("Azure", "Keychain"),
         )
         expected_zh_tokens: tuple[tuple[str, ...], ...] = (
             ("翻译", "解释"),
             ("继续追问",),
             ("框选",),
-            ("服务商",),
+            ("Azure", "Keychain"),
         )
 
         for idx, card in enumerate(walkthrough_parser.cards, start=1):

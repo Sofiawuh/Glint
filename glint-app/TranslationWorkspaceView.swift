@@ -18,6 +18,8 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     var onTranslationChanged: ((String) -> Void)?
     var onTargetChanged: ((String) -> Void)?
     var onFormattingChanged: ((TranslationFormattingMode) -> Void)?
+    var onAIAction: ((TranslationWorkbenchField, TranslationFormattingMode) -> Void)?
+    var onPairAIAction: ((TranslationFormattingMode) -> Void)?
     var onRetranslate: (() -> Void)?
     var onSpeak: ((TranslationWorkbenchField) -> Void)?
 
@@ -31,22 +33,45 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     private let translationSpeakButton = NSButton()
     private let sourceCopyButton = NSButton()
     private let translationCopyButton = NSButton()
-    private let copyAllButton = NSButton()
+    private let sourceFormatButton = NSButton()
+    private let sourcePolishButton = NSButton()
+    private let translationFormatButton = NSButton()
+    private let translationPolishButton = NSButton()
+    private let pairAIButton = NSButton()
     private let retranslateButton = NSButton(title: "重新翻译", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
     private let progress = NSProgressIndicator()
     private var isProgrammaticChange = false
     private var isReadOnly = false
     private var isLoading = false
+    private var aiFieldInFlight: TranslationWorkbenchField?
+    private var isPairAIProcessing = false
+    private var sourceIsDirty = false
+    private var compactPreferredHeight: CGFloat?
+
+    override var fittingSize: NSSize {
+        NSSize(
+            width: max(frame.width, 660),
+            height: compactPreferredHeight ?? max(frame.height, 520)
+        )
+    }
 
     var sourceText: String { sourceView.string }
     var translatedText: String { translationView.string }
     var targetLanguage: String {
-        let index = max(0, targetLanguagePopup.indexOfSelectedItem)
-        return Self.languageChoices[min(index, Self.languageChoices.count - 1)].code
+        let index = targetLanguagePopup.indexOfSelectedItem
+        guard index > 0 else { return "auto" }
+        return Self.languageChoices[min(index - 1, Self.languageChoices.count - 1)].code
+    }
+    var targetMode: TranslationTargetMode {
+        targetLanguagePopup.indexOfSelectedItem == 0 ? .automatic : .fixed
     }
     var formattingMode: TranslationFormattingMode {
-        formattingPopup.indexOfSelectedItem == 1 ? .strict : .smart
+        switch formattingPopup.indexOfSelectedItem {
+        case 0: return .strict
+        case 2: return .polish
+        default: return .smart
+        }
     }
 
     override init(frame frameRect: NSRect) {
@@ -62,37 +87,96 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         sourceLanguage: String,
         targetLanguage: String,
         formattingMode: TranslationFormattingMode,
+        targetMode: TranslationTargetMode = .fixed,
         readOnly: Bool
     ) {
         isReadOnly = readOnly
+        sourceIsDirty = false
         isProgrammaticChange = true
-        sourceView.string = sourceText
-        translationView.string = translatedText
+        setPlainText(sourceText, in: sourceView)
+        setPlainText(translatedText, in: translationView)
         isProgrammaticChange = false
         sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
-        selectTarget(targetLanguage)
-        formattingPopup.selectItem(at: formattingMode == .smart ? 0 : 1)
+        selectTarget(targetLanguage, mode: targetMode)
+        selectFormattingMode(formattingMode)
         applyReadOnlyState()
+        updateAdaptiveHeight(source: sourceText, translation: translatedText)
         sourceView.scrollRangeToVisible(NSRange(location: 0, length: 0))
         translationView.scrollRangeToVisible(NSRange(location: 0, length: 0))
     }
 
     func updateTexts(source: String, translation: String, sourceLanguage: String) {
         isProgrammaticChange = true
-        sourceView.string = source
-        translationView.string = translation
+        setPlainText(source, in: sourceView)
+        setPlainText(translation, in: translationView)
         isProgrammaticChange = false
+        sourceIsDirty = false
         sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
+        updateAdaptiveHeight(source: source, translation: translation)
+        applyReadOnlyState()
     }
 
-    func setTargetLanguage(_ code: String) {
-        selectTarget(code)
+    func setTargetLanguage(_ code: String, mode: TranslationTargetMode = .fixed) {
+        selectTarget(code, mode: mode)
+    }
+
+    func updateReports(
+        source: TranslationRenderedReport,
+        translation: TranslationRenderedReport,
+        sourceLanguage: String
+    ) {
+        isProgrammaticChange = true
+        sourceView.textStorage?.setAttributedString(source.attributedText)
+        translationView.textStorage?.setAttributedString(translation.attributedText)
+        isProgrammaticChange = false
+        sourceIsDirty = false
+        sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
+        updateAdaptiveHeight(source: source.attributedText.string, translation: translation.attributedText.string)
+        applyReadOnlyState()
+    }
+
+    func updateReport(
+        _ report: TranslationRenderedReport,
+        field: TranslationWorkbenchField,
+        sourceLanguage: String
+    ) {
+        isProgrammaticChange = true
+        if field == .source {
+            sourceView.textStorage?.setAttributedString(report.attributedText)
+        } else {
+            translationView.textStorage?.setAttributedString(report.attributedText)
+        }
+        isProgrammaticChange = false
+        if field == .source { sourceIsDirty = true }
+        sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
+        applyReadOnlyState()
     }
 
     func setLoading(_ loading: Bool, message: String = "") {
         isLoading = loading
         progress.isHidden = !loading
         loading ? progress.startAnimation(nil) : progress.stopAnimation(nil)
+        statusLabel.stringValue = message
+        statusLabel.textColor = .secondaryLabelColor
+        applyReadOnlyState()
+    }
+
+    func setAIProcessing(
+        field: TranslationWorkbenchField?,
+        message: String = ""
+    ) {
+        aiFieldInFlight = field
+        statusLabel.stringValue = message
+        statusLabel.textColor = .secondaryLabelColor
+        applyReadOnlyState()
+    }
+
+    func setPairAIProcessing(_ processing: Bool, message: String = "") {
+        isPairAIProcessing = processing
+        if !isLoading {
+            progress.isHidden = !processing
+            processing ? progress.startAnimation(nil) : progress.stopAnimation(nil)
+        }
         statusLabel.stringValue = message
         statusLabel.textColor = .secondaryLabelColor
         applyReadOnlyState()
@@ -128,25 +212,36 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         configureActionButton(translationSpeakButton, title: "朗读", symbolName: "speaker.wave.2", action: #selector(speakTranslation))
         configureActionButton(sourceCopyButton, title: "复制", symbolName: "doc.on.doc", action: #selector(copySource))
         configureActionButton(translationCopyButton, title: "复制", symbolName: "doc.on.doc", action: #selector(copyTranslation))
-        configureActionButton(copyAllButton, title: "复制全部", symbolName: "doc.on.doc.fill", action: #selector(copyAll))
-
+        configureActionButton(sourceFormatButton, title: "排版", symbolName: "text.alignleft", action: #selector(formatSource))
+        configureActionButton(sourcePolishButton, title: "润色", symbolName: "sparkles", action: #selector(polishSource))
+        configureActionButton(translationFormatButton, title: "排版", symbolName: "text.alignleft", action: #selector(formatTranslation))
+        configureActionButton(translationPolishButton, title: "润色", symbolName: "sparkles", action: #selector(polishTranslation))
+        targetLanguagePopup.addItem(withTitle: "自动识别（中文 → 英语，其他 → 简体中文）")
         for choice in Self.languageChoices { targetLanguagePopup.addItem(withTitle: choice.title) }
         targetLanguagePopup.controlSize = .small
         targetLanguagePopup.target = self
         targetLanguagePopup.action = #selector(targetChanged)
         targetLanguagePopup.setAccessibilityLabel("目标语言")
 
-        formattingPopup.addItems(withTitles: ["智能排版", "严格保留"])
+        formattingPopup.addItems(withTitles: ["严格保留", "智能排版", "智能润色"])
         formattingPopup.controlSize = .small
         formattingPopup.target = self
         formattingPopup.action = #selector(formattingChanged)
         formattingPopup.setAccessibilityLabel("排版模式")
 
+        pairAIButton.target = self
+        pairAIButton.action = #selector(processPairWithAI)
+        pairAIButton.bezelStyle = .rounded
+        pairAIButton.controlSize = .small
+        pairAIButton.font = .systemFont(ofSize: 11, weight: .semibold)
+        pairAIButton.image = symbol("sparkles")
+        pairAIButton.imagePosition = .imageLeading
+        pairAIButton.setAccessibilityLabel("一键智能排版")
+
         retranslateButton.target = self
         retranslateButton.action = #selector(retranslate)
         retranslateButton.bezelStyle = .rounded
         retranslateButton.controlSize = .small
-        retranslateButton.keyEquivalent = "\r"
         retranslateButton.setAccessibilityLabel("使用当前原文重新翻译")
 
         statusLabel.font = .systemFont(ofSize: 11)
@@ -160,41 +255,40 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
 
         let sourceSection = makeSection(
             title: "原文",
-            languageView: sourceLanguageLabel,
-            buttons: [sourceSpeakButton, sourceCopyButton],
+            languageViews: [sourceLanguageLabel],
+            buttons: [sourceFormatButton, sourcePolishButton, sourceSpeakButton, sourceCopyButton],
             textView: sourceView
         )
-        translationLanguageLabel.font = .systemFont(ofSize: 12, weight: .medium)
-        translationLanguageLabel.textColor = ClaudeTheme.inkMuted
         let translationSection = makeSection(
             title: "译文",
-            languageView: translationLanguageLabel,
-            buttons: [translationSpeakButton, translationCopyButton, copyAllButton],
+            languageViews: [targetLanguagePopup],
+            buttons: [translationFormatButton, translationPolishButton, translationSpeakButton, translationCopyButton],
             textView: translationView
         )
 
-        let targetLabel = NSTextField(labelWithString: "目标")
-        targetLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        targetLabel.textColor = ClaudeTheme.inkMuted
-        let formatLabel = NSTextField(labelWithString: "排版")
-        formatLabel.font = targetLabel.font
-        formatLabel.textColor = targetLabel.textColor
+        let footerSpacer = NSView()
+        footerSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let footer = NSStackView(views: [
-            targetLabel, targetLanguagePopup,
-            formatLabel, formattingPopup,
             progress, statusLabel,
-            retranslateButton
+            footerSpacer,
+            retranslateButton,
+            formattingPopup,
+            pairAIButton
         ])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
         footer.setHuggingPriority(.defaultHigh, for: .vertical)
+        footer.wantsLayer = true
+        footer.layer?.backgroundColor = ClaudeTheme.paperAltBg.cgColor
+        footer.layer?.cornerRadius = 10
+        footer.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
 
         let stack = NSStackView(views: [sourceSection, translationSection, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
-        stack.edgeInsets = NSEdgeInsets(top: 46, left: 20, bottom: 18, right: 20)
+        stack.edgeInsets = NSEdgeInsets(top: 46, left: 18, bottom: 16, right: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
@@ -203,9 +297,9 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            sourceSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            translationSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
-            footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -40),
+            sourceSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
+            translationSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
+            footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -36),
             sourceSection.heightAnchor.constraint(equalTo: translationSection.heightAnchor)
         ])
     }
@@ -216,7 +310,7 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         textView.textColor = ClaudeTheme.inkBody
         textView.backgroundColor = ClaudeTheme.paperAltBg
         textView.drawsBackground = true
-        textView.isRichText = false
+        textView.isRichText = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -235,7 +329,7 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
 
     private func makeSection(
         title: String,
-        languageView: NSView,
+        languageViews: [NSView],
         buttons: [NSButton],
         textView: NSTextView
     ) -> NSView {
@@ -244,7 +338,7 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         heading.textColor = ClaudeTheme.inkStrong
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let header = NSStackView(views: [heading, languageView, spacer] + buttons)
+        let header = NSStackView(views: [heading] + languageViews + [spacer] + buttons)
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
@@ -256,17 +350,32 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        textView.minSize = NSSize(width: 0, height: 110)
+        textView.minSize = NSSize(width: 0, height: 96)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(
+            width: max(1, scroll.contentSize.width),
+            height: CGFloat.greatestFiniteMagnitude
+        )
 
         let section = NSStackView(views: [header, scroll])
         section.orientation = .vertical
         section.alignment = .leading
-        section.spacing = 6
+        section.spacing = 10
+        section.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        section.wantsLayer = true
+        section.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        section.layer?.borderColor = ClaudeTheme.windowBorder.cgColor
+        section.layer?.borderWidth = 1
+        section.layer?.cornerRadius = 12
         section.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            header.widthAnchor.constraint(equalTo: section.widthAnchor),
-            scroll.widthAnchor.constraint(equalTo: section.widthAnchor),
-            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 110)
+            header.widthAnchor.constraint(equalTo: section.widthAnchor, constant: -24),
+            scroll.widthAnchor.constraint(equalTo: section.widthAnchor, constant: -24),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 96)
         ])
         return section
     }
@@ -298,22 +407,70 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         let editable = !isReadOnly && !isLoading
         sourceView.isEditable = editable
         translationView.isEditable = editable
-        targetLanguagePopup.isEnabled = editable
-        formattingPopup.isEnabled = editable
+        targetLanguagePopup.isEnabled = editable && !isPairAIProcessing
+        formattingPopup.isEnabled = editable && !isPairAIProcessing
         retranslateButton.isEnabled = editable
-        sourceSpeakButton.isEnabled = !isReadOnly && !isLoading && !sourceView.string.isEmpty
-        translationSpeakButton.isEnabled = !isReadOnly && !isLoading && !translationView.string.isEmpty
+        sourceSpeakButton.isEnabled = !isLoading && !sourceView.string.isEmpty
+        translationSpeakButton.isEnabled = !isLoading && !translationView.string.isEmpty
         sourceCopyButton.isEnabled = !sourceView.string.isEmpty
         translationCopyButton.isEnabled = !translationView.string.isEmpty
-        copyAllButton.isEnabled = !sourceView.string.isEmpty || !translationView.string.isEmpty
+        for button in [sourceFormatButton, sourcePolishButton, translationFormatButton, translationPolishButton] {
+            button.isEnabled = !isReadOnly
+                && !isLoading
+                && aiFieldInFlight == nil
+                && !isPairAIProcessing
+        }
+        updatePairAIButton()
     }
 
-    private func selectTarget(_ code: String) {
+    private func selectTarget(_ code: String, mode: TranslationTargetMode) {
+        if mode == .automatic {
+            targetLanguagePopup.selectItem(at: 0)
+            return
+        }
         let index = Self.languageChoices.firstIndex { choice in
             choice.code.caseInsensitiveCompare(code) == .orderedSame
         } ?? 0
-        targetLanguagePopup.selectItem(at: index)
-        translationLanguageLabel.stringValue = Self.languageChoices[index].title
+        targetLanguagePopup.selectItem(at: index + 1)
+    }
+
+    private func selectFormattingMode(_ mode: TranslationFormattingMode) {
+        switch mode {
+        case .strict: formattingPopup.selectItem(at: 0)
+        case .smart: formattingPopup.selectItem(at: 1)
+        case .polish: formattingPopup.selectItem(at: 2)
+        }
+        updatePairAIButton()
+    }
+
+    private func updatePairAIButton() {
+        let mode = formattingMode
+        pairAIButton.title = mode == .polish ? "一键智能润色" : "一键智能排版"
+        pairAIButton.setAccessibilityLabel(pairAIButton.title)
+        pairAIButton.isHidden = isReadOnly || mode == .strict
+        pairAIButton.isEnabled = !pairAIButton.isHidden
+            && !isLoading
+            && aiFieldInFlight == nil
+            && !isPairAIProcessing
+            && !sourceIsDirty
+            && !sourceView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !translationView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        pairAIButton.keyEquivalent = pairAIButton.isEnabled ? "\r" : ""
+        pairAIButton.keyEquivalentModifierMask = []
+        retranslateButton.keyEquivalent = sourceIsDirty && retranslateButton.isEnabled ? "\r" : ""
+        retranslateButton.keyEquivalentModifierMask = []
+    }
+
+    private func updateAdaptiveHeight(source: String, translation: String) {
+        let longest = max(source.count, translation.count)
+        let lines = max(
+            source.components(separatedBy: .newlines).count,
+            translation.components(separatedBy: .newlines).count
+        )
+        compactPreferredHeight = longest <= 1_600 && lines <= 14 ? 430 : nil
+        if let compactPreferredHeight, frame.height > compactPreferredHeight {
+            frame.size.height = compactPreferredHeight
+        }
     }
 
     private static func languageTitle(_ code: String, fallback: String) -> String {
@@ -325,39 +482,49 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         guard !isProgrammaticChange else { return }
         if (notification.object as? NSTextView) === sourceView {
+            sourceIsDirty = true
             onSourceChanged?(sourceView.string)
         } else if (notification.object as? NSTextView) === translationView {
             onTranslationChanged?(translationView.string)
         }
+        updateAdaptiveHeight(source: sourceView.string, translation: translationView.string)
         applyReadOnlyState()
     }
 
     @objc private func targetChanged() {
-        translationLanguageLabel.stringValue = Self.languageChoices[
-            max(0, targetLanguagePopup.indexOfSelectedItem)
-        ].title
         onTargetChanged?(targetLanguage)
     }
-    @objc private func formattingChanged() { onFormattingChanged?(formattingMode) }
+    @objc private func formattingChanged() {
+        updatePairAIButton()
+        onFormattingChanged?(formattingMode)
+    }
     @objc private func retranslate() { onRetranslate?() }
+    @objc private func processPairWithAI() { onPairAIAction?(formattingMode) }
     @objc private func speakSource() { onSpeak?(.source) }
     @objc private func speakTranslation() { onSpeak?(.translation) }
+    @objc private func formatSource() { onAIAction?(.source, .smart) }
+    @objc private func polishSource() { onAIAction?(.source, .polish) }
+    @objc private func formatTranslation() { onAIAction?(.translation, .smart) }
+    @objc private func polishTranslation() { onAIAction?(.translation, .polish) }
 
-    @objc private func copySource() { copy(sourceView.string, button: sourceCopyButton) }
-    @objc private func copyTranslation() { copy(translationView.string, button: translationCopyButton) }
-    @objc private func copyAll() {
-        copy("原文\n\(sourceView.string)\n\n译文\n\(translationView.string)", button: copyAllButton)
+    @objc private func copySource() { copy(sourceView.attributedString(), button: sourceCopyButton) }
+    @objc private func copyTranslation() { copy(translationView.attributedString(), button: translationCopyButton) }
+    @discardableResult
+    func copyAllToPasteboard() -> Bool {
+        guard !sourceView.string.isEmpty || !translationView.string.isEmpty else { return false }
+        let combined = NSMutableAttributedString(string: "原文\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
+        ])
+        combined.append(sourceView.attributedString())
+        combined.append(NSAttributedString(string: "\n\n译文\n", attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
+        ]))
+        combined.append(translationView.attributedString())
+        return writeToPasteboard(combined)
     }
 
-    private func copy(_ text: String, button: NSButton) {
-        guard !text.isEmpty else { return }
-        let payload = TranslationClipboardPayload.make(currentText: text)
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        let item = NSPasteboardItem()
-        item.setString(payload.plainText, forType: .string)
-        item.setData(payload.rtf, forType: .rtf)
-        pasteboard.writeObjects([item])
+    private func copy(_ text: NSAttributedString, button: NSButton) {
+        guard writeToPasteboard(text) else { return }
         let oldTitle = button.title
         let oldImage = button.image
         button.title = "已复制"
@@ -366,5 +533,22 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
             button?.title = oldTitle
             button?.image = oldImage
         }
+    }
+
+    private func writeToPasteboard(_ text: NSAttributedString) -> Bool {
+        guard text.length > 0 else { return false }
+        let payload = TranslationClipboardPayload.make(currentAttributedText: text)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(payload.plainText, forType: .string)
+        item.setData(payload.rtf, forType: .rtf)
+        pasteboard.writeObjects([item])
+        return true
+    }
+
+    private func setPlainText(_ text: String, in textView: NSTextView) {
+        let report = TranslationBlockRenderer.render(blocks: [.paragraph(text)])
+        textView.textStorage?.setAttributedString(report.attributedText)
     }
 }

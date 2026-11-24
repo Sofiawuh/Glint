@@ -99,7 +99,10 @@ final class TextCommandPanelController: NSObject {
         ) else { return false }
 
         cancelHintDismissal()
-        let frame = frameNearMouse(mouseLocation, size: actionSize)
+        guard let frame = frameNearMouse(mouseLocation, size: actionSize) else {
+            lifecycle.hide()
+            return false
+        }
         let panel = ensurePanel(frame: frame)
         panel.setFrame(frame, display: true)
         panel.hasShadow = true
@@ -140,7 +143,10 @@ final class TextCommandPanelController: NSObject {
     ) -> Bool {
         guard lifecycle.completeWithoutText(request) else { return false }
         cancelHintDismissal()
-        let frame = frameNearMouse(mouseLocation, size: hintSize)
+        guard let frame = frameNearMouse(mouseLocation, size: hintSize) else {
+            lifecycle.hide()
+            return false
+        }
         let panel = ensurePanel(frame: frame)
         panel.setFrame(frame, display: true)
         panel.hasShadow = true
@@ -185,10 +191,11 @@ final class TextCommandPanelController: NSObject {
 
     func runSmokeTest(outputDirectory: String, completion: @escaping (Bool) -> Void) {
         let request = beginRequest()
-        let pointer = NSPoint(
-            x: (NSScreen.main ?? NSScreen.screens[0]).visibleFrame.midX,
-            y: (NSScreen.main ?? NSScreen.screens[0]).visibleFrame.midY
-        )
+        guard let visibleFrame = NSScreen.main?.visibleFrame ?? NSScreen.screens.first?.visibleFrame else {
+            completion(false)
+            return
+        }
+        let pointer = NSPoint(x: visibleFrame.midX, y: visibleFrame.midY)
         guard showActions(
             text: "用于验证文字命令面板的示例文字",
             request: request,
@@ -250,10 +257,16 @@ final class TextCommandPanelController: NSObject {
         }
     }
 
-    private func frameNearMouse(_ point: NSPoint, size: NSSize) -> NSRect {
-        textCommandPanelFrame(
+    private func frameNearMouse(_ point: NSPoint, size: NSSize) -> NSRect? {
+        let screens = NSScreen.screens
+        guard let visibleFrame = textCommandPanelVisibleFrame(
             mouseLocation: point,
-            visibleFrame: screenFor(point: point).visibleFrame,
+            availableVisibleFrames: screens.map(\.visibleFrame),
+            mainVisibleFrame: NSScreen.main?.visibleFrame
+        ) else { return nil }
+        return textCommandPanelFrame(
+            mouseLocation: point,
+            visibleFrame: visibleFrame,
             panelSize: size
         )
     }
@@ -278,21 +291,6 @@ final class TextCommandPanelController: NSObject {
         created.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel = created
         return created
-    }
-
-    private func screenFor(point: NSPoint) -> NSScreen {
-        if let exact = NSScreen.screens.first(where: { $0.frame.contains(point) }) {
-            return exact
-        }
-        return NSScreen.screens.min {
-            squaredDistance(point, to: $0.frame) < squaredDistance(point, to: $1.frame)
-        } ?? NSScreen.main ?? NSScreen.screens[0]
-    }
-
-    private func squaredDistance(_ point: NSPoint, to rect: NSRect) -> CGFloat {
-        let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
-        let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
-        return dx * dx + dy * dy
     }
 
     private func cancelHintDismissal() {

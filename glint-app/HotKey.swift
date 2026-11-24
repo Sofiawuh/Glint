@@ -118,17 +118,14 @@ private final class SystemCarbonHotKeyBoundary: CarbonHotKeySystemBoundary {
 
     func unregisterEventHotKey(token: UInt64) -> OSStatus {
         lock.lock()
+        defer { lock.unlock() }
         guard let ref = hotKeyRefs[token] else {
-            lock.unlock()
             return noErr
         }
-        lock.unlock()
 
         let status = UnregisterEventHotKey(ref)
         if status == noErr {
-            lock.lock()
             hotKeyRefs.removeValue(forKey: token)
-            lock.unlock()
         }
         return status
     }
@@ -139,22 +136,49 @@ private final class SystemCarbonHotKeyBoundary: CarbonHotKeySystemBoundary {
 }
 
 private final class HotKeyActionGate {
-    var isActive: Bool
+    private let lock = NSLock()
+    private var active: Bool
     let action: () -> Void
 
+    var isActive: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+
     init(isActive: Bool, action: @escaping () -> Void) {
-        self.isActive = isActive
+        self.active = isActive
         self.action = action
     }
 
+    func activate() {
+        lock.lock()
+        active = true
+        lock.unlock()
+    }
+
+    func deactivate() {
+        lock.lock()
+        active = false
+        lock.unlock()
+    }
+
     func fire() {
-        if isActive { action() }
+        guard isActive else { return }
+        action()
     }
 }
 
 private final class CarbonHotKeyRegistration: HotKeyRegistration {
+    private enum InvalidationState {
+        case active(UInt64)
+        case invalidating(UInt64)
+        case inactive
+    }
+
     let hotKey: ScreenshotHotKey
-    private var token: UInt64?
+    private let invalidationCondition = NSCondition()
+    private var invalidationState: InvalidationState
     private let systemBoundary: any CarbonHotKeySystemBoundary
     private let gate: HotKeyActionGate
     private let removeAction: () -> Void
@@ -169,25 +193,48 @@ private final class CarbonHotKeyRegistration: HotKeyRegistration {
         removeAction: @escaping () -> Void
     ) {
         self.hotKey = hotKey
-        self.token = token
+        self.invalidationState = .active(token)
         self.systemBoundary = systemBoundary
         self.gate = gate
         self.removeAction = removeAction
     }
 
     func activate() {
-        gate.isActive = true
+        gate.activate()
     }
 
     @discardableResult
     func invalidate() -> OSStatus {
-        guard let token else { return noErr }
+        let token: UInt64
+        invalidationCondition.lock()
+        acquireToken: while true {
+            switch invalidationState {
+            case .inactive:
+                invalidationCondition.unlock()
+                return noErr
+            case .invalidating:
+                invalidationCondition.wait()
+            case .active(let activeToken):
+                token = activeToken
+                invalidationState = .invalidating(activeToken)
+                invalidationCondition.unlock()
+                break acquireToken
+            }
+        }
+
         let status = systemBoundary.unregisterEventHotKey(token: token)
-        guard status == noErr else { return status }
-        self.token = nil
-        gate.isActive = false
-        removeAction()
-        return noErr
+        invalidationCondition.lock()
+        if status == noErr {
+            invalidationState = .inactive
+            gate.deactivate()
+        } else {
+            invalidationState = .active(token)
+        }
+        invalidationCondition.broadcast()
+        invalidationCondition.unlock()
+
+        if status == noErr { removeAction() }
+        return status
     }
 
     deinit {

@@ -7,6 +7,14 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_SWIFT = REPO_ROOT / "glint-app" / "Config.swift"
+CONFIG_DEPENDENCIES = [
+    REPO_ROOT / "glint-app" / "TranslationFormatting.swift",
+    REPO_ROOT / "glint-app" / "TranslationDocument.swift",
+    CONFIG_SWIFT,
+    REPO_ROOT / "glint-app" / "ScreenshotHotKey.swift",
+    REPO_ROOT / "glint-app" / "TextCommandHotKey.swift",
+    REPO_ROOT / "glint-app" / "HotKey.swift",
+]
 MAIN_SWIFT = REPO_ROOT / "glint-app" / "main.swift"
 GLINT_APP_BIN = REPO_ROOT / "glint-app" / "Glint.app" / "Contents" / "MacOS" / "Glint"
 
@@ -41,72 +49,32 @@ func assertNoSystemMessages(in messages: [[String: Any]], context: String) {
     }
 }
 
-func loadTestProviders() -> (openai: Provider, anthropic: Provider, gemini: Provider) {
-    let glintConfigDir = ("~/.config/glint" as NSString).expandingTildeInPath
-    let glintConfigPath = glintConfigDir + "/config.json"
-    let fm = FileManager.default
-    try! fm.createDirectory(atPath: glintConfigDir, withIntermediateDirectories: true)
-
-    let configJSON = """
-    {
-      "active": "OpenAI",
-      "providers": [
-        {
-          "name": "OpenAI",
-          "format": "openai",
-          "baseURL": "https://api.openai.com/v1",
-          "apiKey": "sk-openai-test",
-          "model": "gpt-4o",
-          "vision": true
-        },
-        {
-          "name": "Anthropic",
-          "format": "anthropic",
-          "baseURL": "https://api.anthropic.com",
-          "apiKey": "sk-ant-test",
-          "model": "claude-sonnet-4-20250514",
-          "vision": true
-        },
-        {
-          "name": "Gemini",
-          "format": "gemini",
-          "baseURL": "https://generativelanguage.googleapis.com/v1beta",
-          "apiKey": "gem-test-key",
-          "model": "gemini-2.5-flash",
-          "vision": true
-        }
-      ]
-    }
-    """
-    try! configJSON.write(toFile: glintConfigPath, atomically: true, encoding: .utf8)
-    AppConfig.shared.load()
-
-    guard let openai = AppConfig.shared.providers.first(where: { $0.name == "OpenAI" }),
-          let anthropic = AppConfig.shared.providers.first(where: { $0.name == "Anthropic" }),
-          let gemini = AppConfig.shared.providers.first(where: { $0.name == "Gemini" }) else {
-        fail("Failed to load test providers from isolated config.json")
-    }
-    return (openai, anthropic, gemini)
+func testAzureGPT() -> AzureOpenAIConfig {
+    AzureOpenAIConfig(
+        endpoint: "https://fictional-resource.openai.azure.com/openai/v1",
+        apiKey: "fictional-azure-key",
+        deploymentName: "fictional-gpt-deployment",
+        supportsVision: true
+    )
 }
 
-func buildRequestJSON(provider: Provider, messages: [[String: Any]]) -> [String: Any] {
-    let requestOpt: URLRequest? = try? provider.buildRequest(
+func buildRequestJSON(config: AzureOpenAIConfig, messages: [[String: Any]]) -> [String: Any] {
+    let requestOpt = config.buildRequest(
         messages: messages,
-        temperature: 0.7,
         maxTokens: 1024,
         stream: true
     )
     guard let request = requestOpt else {
-        fail("Provider.buildRequest returned nil for \(provider.name)")
+        fail("AzureOpenAIConfig.buildRequest returned nil")
     }
     guard let url = request.url, url.scheme == "https" else {
-        fail("Invalid request URL for \(provider.name): \(String(describing: request.url))")
+        fail("Invalid Azure GPT request URL: \(String(describing: request.url))")
     }
     guard let body = request.httpBody, !body.isEmpty else {
-        fail("Empty request body for \(provider.name)")
+        fail("Empty Azure GPT request body")
     }
     guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-        fail("Request body is not a JSON dictionary for \(provider.name)")
+        fail("Azure GPT request body is not a JSON dictionary")
     }
     return json
 }
@@ -127,7 +95,9 @@ def _compile_and_run_swift_probe(probe_source: str) -> subprocess.CompletedProce
                 "swiftc",
                 "-framework",
                 "Foundation",
-                str(CONFIG_SWIFT),
+                "-framework",
+                "Carbon",
+                *(str(path) for path in CONFIG_DEPENDENCIES),
                 str(probe_file),
                 "-o",
                 str(probe_bin),
@@ -358,68 +328,22 @@ guard (messages[1]["role"] as? String) == "assistant",
     fail("subsequent turns were not preserved in order")
 }
 
-let providers = loadTestProviders()
-
-let openaiJSON = buildRequestJSON(provider: providers.openai, messages: messages)
-guard let openaiMessages = openaiJSON["messages"] as? [[String: Any]],
-      openaiMessages.count == 3 else {
-    fail("OpenAI request missing 3 messages")
+let azureJSON = buildRequestJSON(config: testAzureGPT(), messages: messages)
+guard let azureMessages = azureJSON["messages"] as? [[String: Any]],
+      azureMessages.count == 3 else {
+    fail("Azure GPT request missing 3 messages")
 }
-assertNoSystemMessages(in: openaiMessages, context: "OpenAI text request")
-let openaiFirst = extractText(from: openaiMessages[0]["content"])
-guard (openaiMessages[0]["role"] as? String) == "user",
-      openaiFirst.contains(selectedText),
-      openaiFirst.contains("列出潜在边界条件"),
-      !openaiFirst.contains("请解释"),
-      (openaiMessages[1]["role"] as? String) == "assistant",
-      extractText(from: openaiMessages[1]["content"]) == "1. 空数组",
-      (openaiMessages[2]["role"] as? String) == "user",
-      extractText(from: openaiMessages[2]["content"]) == "补充 Swift 代码" else {
-    fail("OpenAI request messages did not preserve text context and turns")
-}
-
-let anthropicJSON = buildRequestJSON(provider: providers.anthropic, messages: messages)
-guard anthropicJSON["system"] == nil else {
-    fail("Anthropic JSON must not contain a system key")
-}
-guard let anthropicMessages = anthropicJSON["messages"] as? [[String: Any]],
-      anthropicMessages.count == 3 else {
-    fail("Anthropic request missing 3 messages")
-}
-assertNoSystemMessages(in: anthropicMessages, context: "Anthropic text request")
-let anthropicFirst = extractText(from: anthropicMessages[0]["content"])
-guard (anthropicMessages[0]["role"] as? String) == "user",
-      anthropicFirst.contains(selectedText),
-      anthropicFirst.contains("列出潜在边界条件"),
-      !anthropicFirst.contains("请解释"),
-      (anthropicMessages[1]["role"] as? String) == "assistant",
-      extractText(from: anthropicMessages[1]["content"]) == "1. 空数组",
-      (anthropicMessages[2]["role"] as? String) == "user",
-      extractText(from: anthropicMessages[2]["content"]) == "补充 Swift 代码" else {
-    fail("Anthropic request messages did not preserve text context and turns")
-}
-
-let geminiJSON = buildRequestJSON(provider: providers.gemini, messages: messages)
-guard geminiJSON["systemInstruction"] == nil else {
-    fail("Gemini JSON must not contain a systemInstruction key")
-}
-guard let geminiContents = geminiJSON["contents"] as? [[String: Any]],
-      geminiContents.count == 3 else {
-    fail("Gemini request missing 3 contents entries")
-}
-assertNoSystemMessages(in: geminiContents, context: "Gemini text request")
-let geminiFirst = extractText(from: geminiContents[0]["parts"])
-let geminiSecond = extractText(from: geminiContents[1]["parts"])
-let geminiThird = extractText(from: geminiContents[2]["parts"])
-guard (geminiContents[0]["role"] as? String) == "user",
-      geminiFirst.contains(selectedText),
-      geminiFirst.contains("列出潜在边界条件"),
-      !geminiFirst.contains("请解释"),
-      (geminiContents[1]["role"] as? String) == "model",
-      geminiSecond == "1. 空数组",
-      (geminiContents[2]["role"] as? String) == "user",
-      geminiThird == "补充 Swift 代码" else {
-    fail("Gemini request contents did not preserve text context and turns")
+assertNoSystemMessages(in: azureMessages, context: "Azure GPT text request")
+let azureFirst = extractText(from: azureMessages[0]["content"])
+guard (azureMessages[0]["role"] as? String) == "user",
+      azureFirst.contains(selectedText),
+      azureFirst.contains("列出潜在边界条件"),
+      !azureFirst.contains("请解释"),
+      (azureMessages[1]["role"] as? String) == "assistant",
+      extractText(from: azureMessages[1]["content"]) == "1. 空数组",
+      (azureMessages[2]["role"] as? String) == "user",
+      extractText(from: azureMessages[2]["content"]) == "补充 Swift 代码" else {
+    fail("Azure GPT request messages did not preserve text context and turns")
 }
 
 print("TEXT_CONTEXT_ASSEMBLY_OK")
@@ -469,72 +393,21 @@ guard hasImageURLPart, hasUserTextPart, !combinedBuiltText.contains("请解释�
     fail("image message content parts missing image_url/text or containing hardcoded prompt")
 }
 
-let providers = loadTestProviders()
-
-let openaiJSON = buildRequestJSON(provider: providers.openai, messages: messages)
-guard let openaiMessages = openaiJSON["messages"] as? [[String: Any]],
-      openaiMessages.count == 1,
-      (openaiMessages[0]["role"] as? String) == "user",
-      let openaiParts = openaiMessages[0]["content"] as? [[String: Any]] else {
-    fail("OpenAI multimodal request structure invalid")
+let azureJSON = buildRequestJSON(config: testAzureGPT(), messages: messages)
+guard let azureMessages = azureJSON["messages"] as? [[String: Any]],
+      azureMessages.count == 1,
+      (azureMessages[0]["role"] as? String) == "user",
+      let azureParts = azureMessages[0]["content"] as? [[String: Any]] else {
+    fail("Azure GPT multimodal request structure invalid")
 }
-assertNoSystemMessages(in: openaiMessages, context: "OpenAI image request")
-let openaiHasImage = openaiParts.contains { part in
+assertNoSystemMessages(in: azureMessages, context: "Azure GPT image request")
+let azureHasImage = azureParts.contains { part in
     (part["type"] as? String) == "image_url"
         && ((part["image_url"] as? [String: Any])?["url"] as? String) == dataURL
 }
-let openaiText = extractText(from: openaiParts)
-guard openaiHasImage, openaiText.contains(userPrompt), !openaiText.contains("请解释这张图片的内容。") else {
-    fail("OpenAI multimodal request missing image_url or user prompt")
-}
-
-let anthropicJSON = buildRequestJSON(provider: providers.anthropic, messages: messages)
-guard anthropicJSON["system"] == nil else {
-    fail("Anthropic image JSON must not contain a system key")
-}
-guard let anthropicMessages = anthropicJSON["messages"] as? [[String: Any]],
-      anthropicMessages.count == 1,
-      (anthropicMessages[0]["role"] as? String) == "user",
-      let anthropicParts = anthropicMessages[0]["content"] as? [[String: Any]] else {
-    fail("Anthropic multimodal request structure invalid")
-}
-assertNoSystemMessages(in: anthropicMessages, context: "Anthropic image request")
-let anthropicHasImage = anthropicParts.contains { part in
-    guard (part["type"] as? String) == "image",
-          let source = part["source"] as? [String: Any] else {
-        return false
-    }
-    return (source["type"] as? String) == "base64"
-        && (source["media_type"] as? String) == "image/png"
-        && (source["data"] as? String) == "iVBORw0KGgo="
-}
-let anthropicText = extractText(from: anthropicParts)
-guard anthropicHasImage, anthropicText.contains(userPrompt), !anthropicText.contains("请解释这张图片的内容。") else {
-    fail("Anthropic multimodal request missing image block or user prompt")
-}
-
-let geminiJSON = buildRequestJSON(provider: providers.gemini, messages: messages)
-guard geminiJSON["systemInstruction"] == nil else {
-    fail("Gemini image JSON must not contain a systemInstruction key")
-}
-guard let geminiContents = geminiJSON["contents"] as? [[String: Any]],
-      geminiContents.count == 1,
-      (geminiContents[0]["role"] as? String) == "user",
-      let geminiParts = geminiContents[0]["parts"] as? [[String: Any]] else {
-    fail("Gemini multimodal request structure invalid")
-}
-assertNoSystemMessages(in: geminiContents, context: "Gemini image request")
-let geminiHasImage = geminiParts.contains { part in
-    guard let inline = (part["inlineData"] as? [String: Any]) ?? (part["inline_data"] as? [String: Any]) else {
-        return false
-    }
-    let mime = (inline["mimeType"] as? String) ?? (inline["mime_type"] as? String)
-    let data = inline["data"] as? String
-    return mime == "image/png" && data == "iVBORw0KGgo="
-}
-let geminiText = extractText(from: geminiParts)
-guard geminiHasImage, geminiText.contains(userPrompt), !geminiText.contains("请解释这张图片的内容。") else {
-    fail("Gemini multimodal request missing inline image block or user prompt")
+let azureText = extractText(from: azureParts)
+guard azureHasImage, azureText.contains(userPrompt), !azureText.contains("请解释这张图片的内容。") else {
+    fail("Azure GPT multimodal request missing image_url or user prompt")
 }
 
 print("IMAGE_CONTEXT_ASSEMBLY_OK")

@@ -6,13 +6,15 @@ enum TranslationTargetMode: String, Codable, CaseIterable, Equatable {
 }
 
 enum TranslationFormattingMode: String, Codable, CaseIterable, Equatable {
-    case smart
     case strict
+    case smart
+    case polish
 
     var displayName: String {
         switch self {
-        case .smart: return "智能排版"
         case .strict: return "严格保留"
+        case .smart: return "智能排版"
+        case .polish: return "智能润色"
         }
     }
 }
@@ -24,73 +26,11 @@ enum SmartTranslationFormatter {
             .replacingOccurrences(of: "\r", with: "\n")
         let hadTrailingNewline = normalized.hasSuffix("\n")
         let lines = normalized.components(separatedBy: "\n").map(trimTrailingWhitespace)
-        guard mode == .smart else {
-            var result = lines.joined(separator: "\n")
-            if !hadTrailingNewline, result.hasSuffix("\n") { result.removeLast() }
-            return result
-        }
-
-        var output: [String] = []
-        var paragraph: [String] = []
-        var inCodeFence = false
-        var inSignature = false
-
-        func flushParagraph() {
-            guard !paragraph.isEmpty else { return }
-            var joined = paragraph[0].trimmingCharacters(in: .whitespaces)
-            for line in paragraph.dropFirst() {
-                let next = line.trimmingCharacters(in: .whitespaces)
-                joined += joinSeparator(left: joined, right: next) + next
-            }
-            output.append(joined)
-            paragraph.removeAll(keepingCapacity: true)
-        }
-
-        for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if inCodeFence {
-                output.append(line)
-                if trimmed.hasPrefix("```") { inCodeFence = false }
-                continue
-            }
-            if trimmed.hasPrefix("```") {
-                flushParagraph()
-                output.append(line)
-                inCodeFence = true
-                continue
-            }
-            if inSignature {
-                flushParagraph()
-                output.append(line)
-                continue
-            }
-            if trimmed == "--" {
-                flushParagraph()
-                output.append("--")
-                inSignature = true
-                continue
-            }
-            if trimmed.isEmpty {
-                flushParagraph()
-                if output.last != "" { output.append("") }
-                continue
-            }
-            if line.contains("\t") {
-                flushParagraph()
-                output.append(line)
-                continue
-            }
-            if isStructuredLine(trimmed) {
-                flushParagraph()
-                output.append(line.trimmingCharacters(in: .whitespaces))
-                continue
-            }
-            paragraph.append(line)
-        }
-        flushParagraph()
-        while output.first == "" { output.removeFirst() }
-        while output.last == "" { output.removeLast() }
-        return output.joined(separator: "\n")
+        // 已有换行是源应用提供的最可靠结构证据。智能排版与润色的
+        // 结构恢复交给 Azure GPT；本地层只做无损规范化，绝不提前合并。
+        var result = lines.joined(separator: "\n")
+        if !hadTrailingNewline, result.hasSuffix("\n") { result.removeLast() }
+        return result
     }
 
     private static func trimTrailingWhitespace(_ line: String) -> String {
@@ -103,7 +43,7 @@ enum SmartTranslationFormatter {
     private static func isStructuredLine(_ line: String) -> Bool {
         if line.contains("\t") { return true }
         if line.hasPrefix("#") || line.hasPrefix(">") || line.hasPrefix("|") { return true }
-        if line.range(of: #"^(?:[-*+]\s+|\d+[.)]\s+)"#, options: .regularExpression) != nil { return true }
+        if line.range(of: #"^(?:[-*+•◦▪‣–]\s+|\d+[.)]\s+)"#, options: .regularExpression) != nil { return true }
         if line.range(of: #"^(?:From|To|Cc|Bcc|Subject|Date|Reply-To|发件人|收件人|抄送|主题|日期)\s*[:：]"#, options: [.regularExpression, .caseInsensitive]) != nil { return true }
         return false
     }

@@ -15,6 +15,13 @@ enum PopupNewSelectionAction: Equatable {
     case replace
 }
 
+struct PopupPinControlPresentation: Equatable {
+    let symbolName: String
+    let accessibilityLabel: String
+
+    var toolTip: String { accessibilityLabel }
+}
+
 struct PopupLifecycle {
     private(set) var state: PopupPresentationState = .dismissed
     private(set) var isPinned = false
@@ -22,6 +29,17 @@ struct PopupLifecycle {
     private(set) var allowsPinning = false
 
     var canRestore: Bool { state == .hiddenRestorable && isRestorableContent }
+    var pinControlPresentation: PopupPinControlPresentation {
+        isPinned
+            ? PopupPinControlPresentation(
+                symbolName: "pin.fill",
+                accessibilityLabel: "取消钉住窗口"
+            )
+            : PopupPinControlPresentation(
+                symbolName: "pin",
+                accessibilityLabel: "钉住窗口"
+            )
+    }
 
     mutating func present(isRestorableContent: Bool, allowsPinning: Bool) {
         state = .visible

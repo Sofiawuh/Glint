@@ -21,7 +21,7 @@ enum TranslationFormattingContractTestSupport {
 }
 
 final class TestSmartTranslationFormatting {
-    static func test_visualHardWrapsInOrdinaryParagraph_mergeWithoutChangingWordsNumbersOrURL() {
+    static func test_existingOrdinaryLineBreaks_preserveSourceStructureWordsNumbersAndURL() {
         let input = """
         The fictional invoice total is USD 1,234.50 and the details are
         available at https://example.invalid/invoices/42 for review before
@@ -31,22 +31,26 @@ final class TestSmartTranslationFormatting {
         let formatted = SmartTranslationFormatter.format(input, mode: .smart)
 
         TranslationFormattingContractTestSupport.expect(
-            formatted == "The fictional invoice total is USD 1,234.50 and the details are available at https://example.invalid/invoices/42 for review before 2026-12-01.",
-            "TestSmartTranslationFormatting.test_visualHardWrapsInOrdinaryParagraph_mergeWithoutChangingWordsNumbersOrURL"
+            formatted == input,
+            "TestSmartTranslationFormatting.test_existingOrdinaryLineBreaks_preserveSourceStructureWordsNumbersAndURL"
         )
     }
 
-    static func test_sourceAndTranslation_eachReceiveTheSameSmartFormattingPolicy() {
+    static func test_sourceAndTranslation_smartAndPolishPreserveEachSidesExistingLines() {
         let source = "A synthetic paragraph wraps\nacross two visual lines."
         let translation = "这是一个虚构段落，因视觉宽度而\n被分成了两行。"
 
-        let formattedSource = SmartTranslationFormatter.format(source, mode: .smart)
-        let formattedTranslation = SmartTranslationFormatter.format(translation, mode: .smart)
+        let smartSource = SmartTranslationFormatter.format(source, mode: .smart)
+        let smartTranslation = SmartTranslationFormatter.format(translation, mode: .smart)
+        let polishSource = SmartTranslationFormatter.format(source, mode: .polish)
+        let polishTranslation = SmartTranslationFormatter.format(translation, mode: .polish)
 
         TranslationFormattingContractTestSupport.expect(
-            formattedSource == "A synthetic paragraph wraps across two visual lines."
-                && formattedTranslation == "这是一个虚构段落，因视觉宽度而被分成了两行。",
-            "TestSmartTranslationFormatting.test_sourceAndTranslation_eachReceiveTheSameSmartFormattingPolicy"
+            smartSource == source
+                && smartTranslation == translation
+                && polishSource == source
+                && polishTranslation == translation,
+            "TestSmartTranslationFormatting.test_sourceAndTranslation_smartAndPolishPreserveEachSidesExistingLines"
         )
     }
 
@@ -58,11 +62,14 @@ final class TestSmartTranslationFormatting {
         To: team@example.invalid
         Subject: Fictional rollout
 
-        The first prose line wraps
-        into the same paragraph.
+        The first prose line already has
+        a source-provided line boundary.
 
-        - Keep the first item
-        - Keep the second item
+        • Keep the first item
+        ◦ Keep the nested item
+        ▪ Keep the third item
+        ‣ Keep the fourth item
+        – Keep the fifth item
 
         > Quoted line one
         > Quoted line two
@@ -86,10 +93,14 @@ final class TestSmartTranslationFormatting {
         To: team@example.invalid
         Subject: Fictional rollout
 
-        The first prose line wraps into the same paragraph.
+        The first prose line already has
+        a source-provided line boundary.
 
-        - Keep the first item
-        - Keep the second item
+        • Keep the first item
+        ◦ Keep the nested item
+        ▪ Keep the third item
+        ‣ Keep the fourth item
+        – Keep the fifth item
 
         > Quoted line one
         > Quoted line two
@@ -131,8 +142,8 @@ final class TestStrictTranslationFormatting {
 @main
 enum TranslationFormattingContractTests {
     static func main() {
-        TestSmartTranslationFormatting.test_visualHardWrapsInOrdinaryParagraph_mergeWithoutChangingWordsNumbersOrURL()
-        TestSmartTranslationFormatting.test_sourceAndTranslation_eachReceiveTheSameSmartFormattingPolicy()
+        TestSmartTranslationFormatting.test_existingOrdinaryLineBreaks_preserveSourceStructureWordsNumbersAndURL()
+        TestSmartTranslationFormatting.test_sourceAndTranslation_smartAndPolishPreserveEachSidesExistingLines()
         TestSmartTranslationFormatting.test_structuredBlocks_preserveBlankLinesMailHeadersSignatureHeadingListQuoteCodeAndTable()
         TestStrictTranslationFormatting.test_strictMode_normalizesNewlinesAndTrailingSpacesWithoutMergingOrRestructuring()
 

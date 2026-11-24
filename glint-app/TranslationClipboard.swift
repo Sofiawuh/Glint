@@ -45,6 +45,15 @@ struct TranslationClipboardPayload {
         return TranslationClipboardPayload(plainText: currentText, rtf: rtf)
     }
 
+    static func make(currentAttributedText: NSAttributedString) -> TranslationClipboardPayload {
+        let fullRange = NSRange(location: 0, length: currentAttributedText.length)
+        let rtf = (try? currentAttributedText.data(
+            from: fullRange,
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf]
+        )) ?? Data()
+        return TranslationClipboardPayload(plainText: currentAttributedText.string, rtf: rtf)
+    }
+
     private static func bodyStyle() -> NSMutableParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.lineSpacing = 3

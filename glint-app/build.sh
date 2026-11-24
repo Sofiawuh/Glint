@@ -22,9 +22,9 @@ else
 fi
 
 echo "==> 1/5 编译 universal 二进制 (arm64 + x86_64) 与生成品牌图标 (Glint.icns)"
-SRCS="main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift RecentResults.swift RecentResultsPresentation.swift TranslationFormatting.swift TranslationDocument.swift TranslationService.swift TranslationWorkbench.swift TranslationClipboard.swift TranslationWorkspaceView.swift"
-swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Carbon -O $RUNTIME_COMPAT_FLAGS
-swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Carbon -O $RUNTIME_COMPAT_FLAGS
+SRCS="main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift SecureCredentialStore.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift RecentResults.swift RecentResultsPresentation.swift TranslationFormatting.swift TranslationDocument.swift TranslationService.swift TranslationWorkbench.swift TranslationClipboard.swift TranslationWorkspaceView.swift TranslationAIService.swift TranslationContentValidator.swift TranslationBlockRenderer.swift"
+swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Carbon -framework Security -O $RUNTIME_COMPAT_FLAGS
+swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Carbon -framework Security -O $RUNTIME_COMPAT_FLAGS
 lipo -create -output /tmp/glint_uni /tmp/glint_arm64 /tmp/glint_x86
 echo "    架构: $(lipo -archs /tmp/glint_uni)"
 
@@ -88,13 +88,13 @@ Glint 文字翻译 / 文字提问 / 截图提问 —— 安装 3 步
 配置 Azure(图形界面,无需命令行):
    点菜单栏 Glint 图标 →「设置…」→「Azure」。
    Azure Text Translation 填 Endpoint、API Key、Region；Azure GPT 填 /openai/v1 Endpoint、API Key、Deployment Name。
-   Azure Speech 填完整 TTS REST Endpoint、Speech Key；Voice 保持 auto 即可按语言自动匹配。
+   Azure Speech 只需填写 Azure Portal 显示的 Endpoint 和 Speech Key；Glint 会自动识别区域并按语言选择声音。
    三组配置都可以先点「测试连接」验证当前输入，再点「保存」。
-   「基础」页可设置自动/固定目标语言，以及智能排版/严格保留。
+   翻译目标语言和「严格保留 / 智能排版 / 智能润色」只在翻译弹窗底部调整，并自动记住最后一次选择。
 
 用法:
  - 文字命令:任意 App 里选中文字 → 按全局快捷键(默认为数字 1 左侧的 ` 键,可在「设置… → 基础」独立录制)→ 鼠标右下直接显示「翻译」「提问」:
-   点「翻译」打开原文/译文双编辑工作台，可修改、重译、复制当前排版内容或朗读；点「提问」将选中文字作为上下文暂存,输入你的 Prompt 后发送。单纯拖选、滚动或调整窗口不会自动弹出入口。
+   点「翻译」打开原文/译文双编辑工作台，可修改、重译、智能排版、智能润色、复制当前结构化报告或朗读；点「提问」将选中文字作为上下文暂存,输入你的 Prompt 后发送。单纯拖选、滚动或调整窗口不会自动弹出入口。
  - 最近结果:点菜单栏 Glint 图标 →「最近结果」,可只读回看本次运行内最近 10 条文字翻译或文字问答;退出 Glint 后自动清空。
  - 截图提问:按全局快捷键(默认 ⌃⌥E,可在「设置… → 基础」直接录制修改)→ 框选屏幕一块 → 将截图作为上下文暂存,输入你的 Prompt 后由多模态模型回答并支持继续追问。
    首次用要再授「屏幕录制」:系统设置 → 隐私与安全性 → 屏幕录制 → 打开 Glint(授完重开一次 App)。

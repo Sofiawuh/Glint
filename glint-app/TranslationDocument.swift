@@ -47,14 +47,20 @@ struct TranslationDocument {
         var inCodeFence = false
 
         func placeholder(for text: String) -> String {
-            let id = String(format: "fragment-%04d", collected.count)
-            let protected = Self.protectTokens(in: text, fragmentIndex: collected.count)
-            collected.append(TranslationFragment(
-                id: id,
-                text: protected.text,
-                protectedTokens: protected.tokens
-            ))
-            return "\u{E000}\(id)\u{E001}"
+            Self.stableChunks(
+                text,
+                maximumCharacters: TranslationBatchLimits.azureDefault.maxCharacters
+            ).map { chunk in
+                let fragmentIndex = collected.count
+                let id = String(format: "fragment-%04d", fragmentIndex)
+                let protected = Self.protectTokens(in: chunk, fragmentIndex: fragmentIndex)
+                collected.append(TranslationFragment(
+                    id: id,
+                    text: protected.text,
+                    protectedTokens: protected.tokens
+                ))
+                return "\u{E000}\(id)\u{E001}"
+            }.joined()
         }
 
         for line in formattedText.components(separatedBy: "\n") {
@@ -93,7 +99,7 @@ struct TranslationDocument {
                 output.append(match.prefix + placeholder(for: match.content))
                 continue
             }
-            if let match = Self.prefixMatch(in: line, pattern: #"^(\s*(?:[-*+]|\d+[.)])\s+)(.+)$"#) {
+            if let match = Self.prefixMatch(in: line, pattern: #"^(\s*(?:[-*+•◦▪‣–]|\d+[.)])\s+)(.+)$"#) {
                 output.append(match.prefix + placeholder(for: match.content))
                 continue
             }
@@ -137,20 +143,57 @@ struct TranslationDocument {
         guard expected == actual, responses.count == fragments.count else { return nil }
         let map = Dictionary(uniqueKeysWithValues: responses.map { ($0.id, $0.translatedText) })
         guard map.count == fragments.count else { return nil }
-        var result = template
+        var replacements: [String: String] = [:]
         for fragment in fragments {
             guard var replacement = map[fragment.id] else { return nil }
             for token in fragment.protectedTokens {
                 guard Self.occurrenceCount(of: token.placeholder, in: replacement) == 1 else { return nil }
                 replacement = replacement.replacingOccurrences(of: token.placeholder, with: token.originalText)
             }
-            result = result.replacingOccurrences(
-                of: "\u{E000}\(fragment.id)\u{E001}",
-                with: replacement
-            )
+            replacements[fragment.id] = replacement
         }
+        guard let result = Self.renderTemplate(template, replacements: replacements) else { return nil }
         let detected = responses.compactMap(\.detectedLanguage).first { !$0.isEmpty }
         return TranslationDocumentResult(text: result, detectedLanguage: detected)
+    }
+
+    private static func stableChunks(_ text: String, maximumCharacters: Int) -> [String] {
+        let limit = max(1, maximumCharacters)
+        guard text.count > limit else { return [text] }
+        var chunks: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(start, offsetBy: limit, limitedBy: text.endIndex) ?? text.endIndex
+            chunks.append(String(text[start..<end]))
+            start = end
+        }
+        return chunks
+    }
+
+    private static func renderTemplate(
+        _ template: String,
+        replacements: [String: String]
+    ) -> String? {
+        let startMarker = "\u{E000}"
+        let endMarker = "\u{E001}"
+        var output = ""
+        var cursor = template.startIndex
+        var consumed = Set<String>()
+
+        while let markerRange = template.range(of: startMarker, range: cursor..<template.endIndex) {
+            output += template[cursor..<markerRange.lowerBound]
+            let idStart = markerRange.upperBound
+            guard let idEndRange = template.range(of: endMarker, range: idStart..<template.endIndex) else {
+                return nil
+            }
+            let id = String(template[idStart..<idEndRange.lowerBound])
+            guard let replacement = replacements[id], consumed.insert(id).inserted else { return nil }
+            output += replacement
+            cursor = idEndRange.upperBound
+        }
+        output += template[cursor..<template.endIndex]
+        guard consumed.count == replacements.count else { return nil }
+        return output
     }
 
     private static func isTableDelimiter(_ line: String) -> Bool {
