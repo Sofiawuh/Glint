@@ -15,19 +15,15 @@
 - **智能排版**：只恢复文本结构，不改变文字内容；
 - **智能润色**：在保留事实信息的前提下改善语法、用词、语气和可读性。
 
-同时将 Speech 默认设置改为 Region、API Key 和 Voice 选择，由 Glint 自动生成标准 TTS REST Endpoint。
+同时将 Speech 设置简化为 Endpoint 和 API Key 两项；Glint 自动识别区域、生成实际 TTS REST 地址并按文本语言选择声音。
 
 ## 2. 用户界面与默认行为
 
 ### 2.1 基础设置
 
-“翻译排版”改为“默认文本处理”，提供三个互斥选项：
+基础设置删除“翻译目标”和“文本排版”。这两项只在翻译工作台中调整，避免设置页与当前弹窗出现两个互相覆盖的入口。
 
-1. `严格保留`：仅规范换行编码和尾随空格，不调用 GPT；
-2. `智能排版`：Translator 完成翻译后，调用一次 Azure GPT，同时整理原文与译文结构，不修改文字；
-3. `智能润色`：Translator 完成翻译后，调用一次 Azure GPT；原文只做智能排版，译文在排版基础上润色。
-
-现有 `智能排版` 用户升级后继续映射为新的 `智能排版`，现有 `严格保留` 保持不变。新安装默认使用 `智能排版`。
+现有目标语言和排版偏好继续作为兼容迁移输入，但升级后由翻译工作台维护最后一次选择。新安装默认使用 `自动识别 + 智能排版`。
 
 ### 2.2 翻译工作台
 
@@ -36,13 +32,48 @@
 - 原文：`智能排版`、`智能润色`；
 - 译文：`智能排版`、`智能润色`。
 
-自动处理遵守基础设置；手动操作只处理用户点击的编辑区。用户主动点击原文的“智能润色”时，才允许改变原文表达。
+自动处理遵守翻译工作台当前选择；手动操作只处理用户点击的编辑区。用户主动点击原文的“智能润色”时，才允许改变原文表达。
 
-原文编辑区必须以捕获到的原始选区结构为基线。源应用已经提供的段落、空行、项目符号、编号、缩进和签名边界不得在进入工作台前被本地格式化器合并。对于已有标准结构的邮件，右侧原文应在纯文本能力范围内与源邮件保持相同的阅读层级；译文使用同一组结构边界逐块翻译和重组。
+翻译工作台底部是目标语言和文本处理的唯一入口：
+
+- `目标语言`：`自动识别（中文 → 英语，其他 → 简体中文）`，或直接选择具体目标语言；
+- `文本处理`：`严格保留`、`智能排版`、`智能润色`。
+
+弹窗打开时使用上一次选择；选择变化立即保存为下次默认，但不因一次下拉选择自动产生新的云端费用。用户点击“重新翻译”后，当前目标语言和文本处理模式一起生效。初次打开新选区时按已保存值自动翻译。
+
+`严格保留`仅规范换行编码和尾随空格，不调用 GPT。`智能排版`在 Translator 完成后调用一次 Azure GPT，同时整理原文与译文结构且不修改文字。`智能润色`同样只调用一次 GPT，原文只排版，译文在排版基础上润色。
+
+原文编辑区必须以捕获到的原始选区结构为基线。源应用已经提供的段落、空行、项目符号、编号、缩进和签名边界不得在进入工作台前被本地格式化器合并。对于已有标准结构的邮件，右侧原文应保持与源邮件相同的阅读层级；译文使用同一组结构边界逐块翻译和重组。
 
 按钮在请求期间显示处理中状态并防止重复提交，但另一侧编辑、复制和停止朗读仍可用。AI 成功前保留当前编辑内容，失败、取消、响应过期或校验不通过时不得覆盖编辑器。
 
-### 2.3 状态提示
+### 2.3 结构化报告视觉
+
+用户确认采用“结构化报告”视觉方案。Azure GPT 负责识别语义区块，Glint 使用固定的 macOS 原生富文本样式渲染；模型不得自行决定字体、字号、颜色或任意 HTML。
+
+支持的视觉区块包括：
+
+- 问候语；
+- 普通正文；
+- 重点清单；
+- 标题或小节；
+- 引用或说明；
+- 代码与简单表格；
+- 邮件签名。
+
+视觉规则：
+
+- 正文使用克制的系统字体、约 1.55 倍阅读行距和明确段间距；
+- 重点清单使用浅色背景、左侧强调色条、稳定缩进和较大的项目间距；
+- 标题与小节使用半粗体和轻量颜色层级，不使用夸张大字号；
+- 案件号、金额、日期等不可变信息可使用半粗体提升扫描效率，但不得改变内容；
+- 签名使用顶部细分隔线和次级文字颜色；
+- 原文和译文使用相同区块顺序与对应视觉层级；
+- 强调区的“重点清单”等名称属于 Glint 界面装饰，不写入正文，也不进入纯文本复制结果。
+
+编辑器升级为可编辑富文本。用户继续直接修改文字；未修改区块保留样式，新增普通文本使用正文样式。复制纯文本时保留段落、列表和原始文字，复制 RTF 时同时保留当前视觉层级。
+
+### 2.4 状态提示
 
 工作台使用可理解的阶段提示：
 
@@ -77,9 +108,9 @@
 → 本地基础规范化
 → Azure Translator
 → 一次 Azure GPT 请求
-→ 返回 formatted_source + formatted_translation
+→ 返回 source_blocks + translation_blocks
 → 忠实性校验
-→ 显示原文与译文
+→ 原生富文本渲染原文与译文
 ```
 
 `智能润色`：
@@ -89,9 +120,9 @@
 → 本地基础规范化
 → Azure Translator
 → 一次 Azure GPT 请求
-→ 返回 formatted_source + polished_translation
+→ 返回 source_blocks + translation_blocks
 → 忠实性与事实保护校验
-→ 显示原文与译文
+→ 原生富文本渲染原文与译文
 ```
 
 Translator 仍是唯一默认翻译引擎。GPT 不替代 Translator，也不决定目标语言。
@@ -100,18 +131,30 @@ Translator 按结构区块翻译并原位重组。一个源项目符号对应一
 
 ### 3.2 GPT 请求协议
 
-复用已配置的 Azure OpenAI `/openai/v1/chat/completions` 和部署名称。自动处理使用一次请求同时提交原文与 Translator 译文，要求模型只返回严格 JSON：
+复用已配置的 Azure OpenAI `/openai/v1/chat/completions` 和部署名称。自动处理使用一次请求同时提交原文与 Translator 译文。系统提示词要求模型先保留所有文字和事实，再识别问候、正文、重点清单、标题、引用、代码、表格和签名。模型只返回严格 JSON，例如：
 
 ```json
 {
-  "formatted_source": "...",
-  "formatted_translation": "..."
+  "source_blocks": [
+    { "type": "salutation", "text": "Hi Jhovine," },
+    { "type": "paragraph", "text": "..." },
+    { "type": "key_points", "items": ["...", "..."] },
+    { "type": "signature", "text": "Best regards,\nYa Chen" }
+  ],
+  "translation_blocks": [
+    { "type": "salutation", "text": "你好，Jhovine：" },
+    { "type": "paragraph", "text": "..." },
+    { "type": "key_points", "items": ["...", "..."] },
+    { "type": "signature", "text": "此致\nYa Chen" }
+  ]
 }
 ```
 
-智能润色模式仍使用相同字段名，其中 `formatted_source` 只能排版，`formatted_translation` 允许润色。请求采用低随机性设置，不请求流式输出，不记录正文。
+智能排版模式下，两个区块数组都只能调整结构和空白。智能润色模式下，`source_blocks` 仍只能排版，`translation_blocks` 允许润色。请求采用低随机性设置，不请求流式输出，不记录正文。
 
-手动处理只提交当前编辑区文本，并返回一个结构化文本字段。请求开始时捕获编辑器版本；如果用户在等待期间修改了文本，晚到响应必须丢弃。
+模型只能选择已定义区块类型，不能返回颜色、字体、CSS、HTML 或任意视觉参数。Glint 将区块重组为规范纯文本执行忠实性和事实保护校验，校验通过后再由固定渲染器生成富文本。
+
+手动处理只提交当前编辑区文本，并返回该侧的结构化区块数组。请求开始时捕获编辑器版本；如果用户在等待期间修改了文本，晚到响应必须丢弃。
 
 ### 3.3 智能排版边界
 
@@ -163,55 +206,46 @@ Translator 按结构区块翻译并原位重组。一个源项目符号对应一
 
 ### 5.1 默认表单
 
-Speech 设置组改为：
+Speech 设置组只保留：
 
-- `Region`：例如 `eastasia`，自动去除首尾空格并转为小写；
+- `Endpoint`：直接粘贴 Azure Portal 展示的终结点；
 - `API Key`：安全输入，不写日志；
-- `Voice`：下拉选择，默认 `自动匹配语言`；
 - `测试连接`：使用固定短文本发起最小真实合成请求，不包含用户正文，也不自动保存。
 
-普通用户不再填写完整 Endpoint。Glint 根据 Region 自动生成：
+Endpoint 同时接受以下两种格式：
+
+```text
+https://<region>.api.cognitive.microsoft.com/
+https://<region>.tts.speech.microsoft.com/cognitiveservices/v1
+```
+
+当用户粘贴 Portal 通用终结点时，Glint 自动提取 `<region>` 并生成实际请求地址：
 
 ```text
 https://<region>.tts.speech.microsoft.com/cognitiveservices/v1
 ```
 
-Region 只接受字母、数字和连字符，不能为空。Voice 下拉至少提供：
+Glint 不显示 Region 或 Voice 字段。Region 从 Endpoint 自动识别；Voice 始终根据当前朗读内容的语言代码自动选择 Neural Voice。用户不需要知道或填写声音名称。
 
-- 自动匹配语言；
-- 简体中文女声、简体中文男声；
-- 英语女声、英语男声；
-- 日语女声；
-- 韩语女声；
-- 自定义 Neural Voice。
+### 5.2 旧配置迁移
 
-自动匹配继续按当前朗读内容的语言代码选择 Neural Voice。固定 Voice 只在用户明确选择时覆盖自动匹配。
+配置模型保持向后兼容：
 
-### 5.2 自定义 Voice
-
-选择“自定义 Neural Voice…”后显示独立输入框，并校验 Azure Neural Voice 命名格式。Region 不得再出现在 Voice 输入框中；无效 Voice 的错误提示必须指向 Voice，不得笼统提示 Endpoint 或 Key。
-
-### 5.3 旧配置迁移
-
-配置模型新增 `region`，并保持向后兼容：
-
-- 旧 Endpoint 符合 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1` 时，自动提取 Region；
-- 旧 Endpoint 是 `https://<region>.api.cognitive.microsoft.com/` 时，提取 Region 并规范为标准 TTS Endpoint；
-- 旧 Voice 是 `auto`、空值或合法 Neural Voice 时原样迁移；
-- 旧 Voice 等于已识别 Region（例如 `eastasia`）或格式无效时，迁移为 `auto`；
+- 旧 Endpoint 为标准 TTS 地址时继续使用；
+- 旧 Endpoint 是 Portal 通用终结点时，运行时自动生成标准 TTS 地址；
+- 旧 Voice 无论是 `auto`、合法 Voice、误填 Region 或其他无效值，升级后统一改为自动匹配语言；
 - 迁移不得修改或输出 API Key；
-- 保存新配置后只持久化 Region、Key 和 Voice 所需字段，运行时生成 Endpoint。
+- 保存新配置后只持久化用户输入的 Endpoint 和 API Key，Region 与 Voice 均不作为用户设置项。
 
-### 5.4 测试连接与错误信息
+### 5.3 测试连接与错误信息
 
 测试连接必须分阶段校验并返回具体信息：
 
-- `请填写 Speech Region`
-- `Speech Region 格式不正确`
+- `请填写 Speech Endpoint`
+- `Speech Endpoint 格式不正确，无法识别 Azure 区域`
 - `请填写 Speech API Key`
-- `Voice 格式不正确`
 - `Speech Key 无效或资源区域不匹配`
-- `该 Voice 在当前区域不可用`
+- `自动选择的语音在当前区域不可用`
 - `网络错误：…`
 - `✓ Azure Speech 连接成功`
 
@@ -221,10 +255,11 @@ Region 只接受字母、数字和连字符，不能为空。Voice 下拉至少�
 
 - `TranslationAIService`：构造排版/润色请求、解析严格 JSON、处理分批与错误；
 - `TranslationContentValidator`：智能排版字符忠实校验、润色保护项提取与校验；
+- `TranslationBlockRenderer`：将已校验的结构化区块转换为固定的“结构化报告”富文本样式和规范纯文本；
 - `TranslationService`：继续负责 Translator 请求，并编排 Translator 与可选 AI 后处理；
 - `TranslationWorkbench`：保存当前编辑状态、处理代际、AI 操作状态和最近结果更新；
-- `AzureSpeechConfig`：保存 Region、Key、Voice，迁移旧配置并生成运行时 Endpoint；
-- `Settings`：显示 Speech 新表单、Voice 下拉和精确连接探测结果。
+- `AzureSpeechConfig`：保存 Endpoint 和 Key，兼容旧配置，从 Endpoint 解析 Region，生成运行时 TTS 地址并自动选择 Voice；
+- `Settings`：只显示 Speech Endpoint、API Key 和精确连接探测结果。
 
 各组件通过明确输入输出协作；UI 不自行拼接 GPT JSON 或 Speech Endpoint，网络服务不直接修改编辑器状态。
 
@@ -243,14 +278,17 @@ Region 只接受字母、数字和连字符，不能为空。Voice 下拉至少�
 
 - 三种默认文本处理模式的迁移、保存与路由；
 - 智能排版请求、严格 JSON 解析、字符忠实校验与失败回退；
+- 结构化区块白名单、未知类型拒绝、模型视觉参数拒绝和原生富文本渲染；
+- 重点清单强调区、正文层级、签名分隔以及原文与译文视觉对应；
+- 纯文本复制不包含界面装饰标签，RTF 复制保留结构化报告样式；
 - 已有标准邮件段落、连续 Unicode 项目符号、空行和签名在原文中保持，译文结构逐块对应；
 - `•`、`◦`、`▪`、`‣`、`–` 列表不会被拼接到前后段落；
 - 智能润色保护项提取、计数校验、空响应与失败不覆盖；
 - 自动处理只增加一次 GPT 请求，手动处理只作用于指定编辑区；
 - 请求期间用户编辑导致晚到响应失效；
-- Speech Region 自动生成 TTS Endpoint；
-- Portal 通用 Endpoint、标准 TTS Endpoint 与无效 Voice 的旧配置迁移；
-- Voice 自动匹配、固定 Voice、自定义 Voice 与精确字段错误；
+- Portal 通用 Endpoint 自动生成 TTS Endpoint；
+- Portal 通用 Endpoint、标准 TTS Endpoint 与旧 Voice 字段的兼容迁移；
+- Voice 按语言自动匹配，设置页不出现 Region 或 Voice；
 - Speech 真实探测请求不含用户正文；
 - Translator、提问、截图、快捷键、最近结果、复制、朗读和既有配置不回归；
 - Universal Binary、固定签名、隔离 UI smoke 和 `/Applications/Glint.app` 安装通过。
