@@ -225,7 +225,7 @@ final class TestTranslationWorkspaceCardHierarchy {
 }
 
 final class TestTranslationWorkspaceAdaptiveEditors {
-    static func test_shortContent_configurationAdoptsCompactHeightBelowInitialPresentationHeight() {
+    static func test_shortContent_configurationAdoptsApproximately430PointCompactHeight() {
         let view = TranslationWorkspaceView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 600)
         )
@@ -243,10 +243,72 @@ final class TestTranslationWorkspaceAdaptiveEditors {
         let compactFittingHeight = view.fittingSize.height
 
         TranslationWorkspacePresentationContractTestSupport.expect(
-            compactFittingHeight > 0
+            abs(compactFittingHeight - 430) <= 1
+                && abs(adoptedHeight - 430) <= 1
                 && adoptedHeight < initialPresentationHeight
                 && adoptedHeight == compactFittingHeight,
-            "TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationAdoptsCompactHeightBelowInitialPresentationHeight"
+            "TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationAdoptsApproximately430PointCompactHeight"
+        )
+    }
+
+    static func test_longContent_prefersApproximately760PointInitialHeight() {
+        let view = TranslationWorkspaceView(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 570)
+        )
+        let source = (1...80).map { "Synthetic source paragraph \($0)." }.joined(separator: "\n")
+        let translation = (1...80).map { "虚构译文段落 \($0)。" }.joined(separator: "\n")
+        view.configure(
+            sourceText: source,
+            translatedText: translation,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            formattingMode: .smart,
+            readOnly: false
+        )
+        view.layoutSubtreeIfNeeded()
+
+        let preferredHeight = view.fittingSize.height
+        if abs(preferredHeight - 760) > 1 {
+            print("      expected preferred height ≈760, actual \(preferredHeight)")
+        }
+        TranslationWorkspacePresentationContractTestSupport.expect(
+            abs(preferredHeight - 760) <= 1,
+            "TestTranslationWorkspaceAdaptiveEditors.test_longContent_prefersApproximately760PointInitialHeight"
+        )
+    }
+
+    static func test_900By760Workspace_givesEachIndependentEditorAtLeast240VisiblePoints() {
+        let view = TranslationWorkspaceView(
+            frame: NSRect(x: 0, y: 0, width: 900, height: 760)
+        )
+        let source = (1...160).map { "Synthetic source paragraph \($0)." }.joined(separator: "\n")
+        let translation = (1...180).map { "虚构译文段落 \($0)。" }.joined(separator: "\n")
+        view.configure(
+            sourceText: source,
+            translatedText: translation,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            formattingMode: .smart,
+            readOnly: false
+        )
+        view.layoutSubtreeIfNeeded()
+
+        let scrolls = TranslationWorkspacePresentationContractTestSupport.descendants(
+            of: view,
+            as: NSScrollView.self
+        )
+        let visibleHeights = scrolls.map { $0.contentView.bounds.height }
+        let documents = scrolls.compactMap(\.documentView)
+        let hasRequiredHeights = visibleHeights.allSatisfy { $0 >= 240 }
+        if !hasRequiredHeights {
+            print("      expected two visible heights ≥240, actual \(visibleHeights)")
+        }
+
+        TranslationWorkspacePresentationContractTestSupport.expect(
+            scrolls.count == 2
+                && Set(documents.map(ObjectIdentifier.init)).count == 2
+                && hasRequiredHeights,
+            "TestTranslationWorkspaceAdaptiveEditors.test_900By760Workspace_givesEachIndependentEditorAtLeast240VisiblePoints"
         )
     }
 
@@ -281,6 +343,37 @@ final class TestTranslationWorkspaceAdaptiveEditors {
         TranslationWorkspacePresentationContractTestSupport.expect(
             independentlyScrollable,
             "TestTranslationWorkspaceAdaptiveEditors.test_longContent_keepsTwoIndependentVerticalScrollRegions"
+        )
+    }
+
+    static func test_smallScreenSizedWorkspace_staysInsideSafeBoundsWithoutHorizontalScroll() {
+        let safeWidth: CGFloat = 676
+        let safeHeight: CGFloat = 536
+        let view = TranslationWorkspaceView(
+            frame: NSRect(x: 0, y: 0, width: safeWidth, height: safeHeight)
+        )
+        let source = (1...100).map { "Synthetic source paragraph \($0)." }.joined(separator: "\n")
+        let translation = (1...100).map { "虚构译文段落 \($0)。" }.joined(separator: "\n")
+        view.configure(
+            sourceText: source,
+            translatedText: translation,
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            formattingMode: .smart,
+            readOnly: false
+        )
+        view.layoutSubtreeIfNeeded()
+
+        let scrolls = TranslationWorkspacePresentationContractTestSupport.descendants(
+            of: view,
+            as: NSScrollView.self
+        )
+        TranslationWorkspacePresentationContractTestSupport.expect(
+            view.frame.width <= safeWidth
+                && view.frame.height <= safeHeight
+                && scrolls.count == 2
+                && scrolls.allSatisfy { !$0.hasHorizontalScroller },
+            "TestTranslationWorkspaceAdaptiveEditors.test_smallScreenSizedWorkspace_staysInsideSafeBoundsWithoutHorizontalScroll"
         )
     }
 }
@@ -568,8 +661,11 @@ enum TranslationWorkspacePresentationContractTests {
         _ = NSApplication.shared
         TestTranslationWorkspaceCardHierarchy.test_sourceAndTranslation_areSeparateBoundedCardsWithTheirOwnActions()
         TestTranslationWorkspaceCardHierarchy.test_translationCardHeader_containsTargetLanguageSelector()
-        TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationAdoptsCompactHeightBelowInitialPresentationHeight()
+        TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationAdoptsApproximately430PointCompactHeight()
+        TestTranslationWorkspaceAdaptiveEditors.test_longContent_prefersApproximately760PointInitialHeight()
+        TestTranslationWorkspaceAdaptiveEditors.test_900By760Workspace_givesEachIndependentEditorAtLeast240VisiblePoints()
         TestTranslationWorkspaceAdaptiveEditors.test_longContent_keepsTwoIndependentVerticalScrollRegions()
+        TestTranslationWorkspaceAdaptiveEditors.test_smallScreenSizedWorkspace_staysInsideSafeBoundsWithoutHorizontalScroll()
         TestTranslationWorkspaceFixedFooter.test_footerGroupsStatusRetranslationProcessingModeAndManualAIWithoutCopyAll()
         TestTranslationWorkspaceCopyAll.test_normalAndReadOnlyViews_exposeCopyAllActionWithoutFooterButton()
         TestTranslationWorkspaceCopyAll.test_copyAll_readsCurrentEditorsAndPreservesPlainTextAndRTFStructure()
