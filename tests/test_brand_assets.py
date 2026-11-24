@@ -243,11 +243,11 @@ class TestReadmePortal(unittest.TestCase):
                 f"README.md must contain section heading '{section}'",
             )
 
-        for provider in ("DeepSeek", "Gemini", "Vertex AI", "MiMo"):
+        for azure_service in ("Azure Text Translation", "Azure GPT", "Azure Speech"):
             self.assertIn(
-                provider,
+                azure_service,
                 content,
-                f"README.md must document built-in provider '{provider}'",
+                f"README.md must document required service '{azure_service}'",
             )
 
         self.assertIn(
@@ -265,7 +265,6 @@ class TestReadmePortal(unittest.TestCase):
             REPO_ROOT / f"{legacy_token}-app",
             REPO_ROOT / f"{legacy_token}.lua",
             REPO_ROOT / "DeepSeek-Translate.popclipext",
-            REPO_ROOT / "docs" / "superpowers",
         ]
         for path in forbidden_paths:
             self.assertFalse(

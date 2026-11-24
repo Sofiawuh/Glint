@@ -1,8 +1,24 @@
 import Foundation
 
+enum AzureAPIKeySlot: String, CaseIterable, Hashable {
+    case translator
+    case openAI
+    case speech
+}
+
+struct AzureKeychainClient {
+    let read: (AzureAPIKeySlot) -> String?
+    let write: (String, AzureAPIKeySlot) -> Bool
+
+    static let unavailable = AzureKeychainClient(
+        read: { _ in nil },
+        write: { _, _ in false }
+    )
+}
+
 // ============================================================
-// 配置模型与多协议适配层 (OpenAI / Anthropic / Gemini Compatible)
-// 持久化到 ~/.config/glint/config.json。
+// Azure 专用配置与请求适配层。
+// 非敏感配置持久化到 ~/.config/glint/config.json，API Key 仅存 Keychain。
 // ============================================================
 
 let kConfigDir: String = {
@@ -14,41 +30,6 @@ let kConfigDir: String = {
     return (("~/.config/glint" as NSString).expandingTildeInPath)
 }()
 let kLogPath = kConfigDir + "/glint.log"
-
-enum APIFormat: String, Codable, CaseIterable, Equatable {
-    case openai = "openai"
-    case anthropic = "anthropic"
-    case gemini = "gemini"
-
-    // 新增自定义服务商时开放全部三种协议格式
-    static var customSelectableCases: [APIFormat] {
-        [.openai, .anthropic, .gemini]
-    }
-
-    var displayName: String {
-        switch self {
-        case .openai:    return "OpenAI 兼容 (/chat/completions)"
-        case .anthropic: return "Anthropic 兼容 (/v1/messages)"
-        case .gemini:    return "Gemini 兼容 (/v1beta/models)"
-        }
-    }
-
-    var defaultBaseURL: String {
-        switch self {
-        case .openai:    return "https://api.openai.com/v1"
-        case .anthropic: return "https://api.anthropic.com/v1"
-        case .gemini:    return "https://generativelanguage.googleapis.com/v1beta"
-        }
-    }
-
-    var defaultModelPlaceholder: String {
-        switch self {
-        case .openai:    return "deepseek-chat / mimo-v2.5 / gpt-4o"
-        case .anthropic: return "claude-sonnet-4-5"
-        case .gemini:    return "gemini-3.8-flash"
-        }
-    }
-}
 
 enum StreamEvent: Equatable {
     case ignore
@@ -216,7 +197,7 @@ struct AzureTranslatorConfig: Codable, Equatable {
     }
 
     func parseError(statusCode: Int, data: Data?) -> String {
-        AzureErrorFormatter.message(
+        return AzureErrorFormatter.message(
             statusCode: statusCode,
             data: data,
             service: "Azure Translator",
@@ -230,17 +211,42 @@ struct AzureSpeechConfig: Codable, Equatable {
 
     var endpoint: String
     var apiKey: String
-    var voice: String
+    var voice: String { Self.automaticVoice }
 
     init(endpoint: String = "", apiKey: String = "", voice: String = AzureSpeechConfig.automaticVoice) {
         self.endpoint = endpoint
         self.apiKey = apiKey
-        self.voice = voice
+        _ = voice // 兼容旧调用；新版始终按语言自动选 Voice。
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case endpoint
+        case apiKey
+    }
+
+    private enum LegacyCodingKeys: String, CodingKey {
+        case endpoint
+        case apiKey
+        case region
+        case voice
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: LegacyCodingKeys.self)
+        endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint) ?? ""
+        apiKey = try container.decodeIfPresent(String.self, forKey: .apiKey) ?? ""
+        // region / voice 只为兼容旧 JSON 解码，升级后不再作为用户配置。
+        _ = try container.decodeIfPresent(String.self, forKey: .region)
+        _ = try container.decodeIfPresent(String.self, forKey: .voice)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(endpoint, forKey: .endpoint)
+        try container.encode(apiKey, forKey: .apiKey)
     }
 
     func voiceName(for languageCode: String) -> String {
-        let cleanVoice = voice.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !cleanVoice.isEmpty, cleanVoice != Self.automaticVoice { return cleanVoice }
         let code = languageCode.lowercased()
         if code.hasPrefix("zh-hant") || code.hasPrefix("zh-tw") { return "zh-TW-HsiaoChenNeural" }
         if code.hasPrefix("zh") { return "zh-CN-XiaoxiaoNeural" }
@@ -258,17 +264,8 @@ struct AzureSpeechConfig: Codable, Equatable {
     }
 
     func buildSynthesisRequest(text: String, languageCode: String) -> URLRequest? {
-        let cleanEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanEndpoint.isEmpty, !cleanKey.isEmpty,
-              let url = URL(string: cleanEndpoint),
-              url.scheme?.lowercased() == "https", url.host != nil else { return nil }
-        let rawVoice = voice
-        let cleanVoice = rawVoice.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard rawVoice == cleanVoice || rawVoice.isEmpty,
-              cleanVoice.isEmpty || cleanVoice == Self.automaticVoice || Self.isValidVoiceName(cleanVoice) else {
-            return nil
-        }
+        guard !cleanKey.isEmpty, let url = runtimeSynthesisURL else { return nil }
         let voiceName = voiceName(for: languageCode)
         guard Self.isValidVoiceName(voiceName) else { return nil }
         let locale = locale(for: languageCode)
@@ -291,8 +288,27 @@ struct AzureSpeechConfig: Codable, Equatable {
         buildSynthesisRequest(text: "Speech connection test.", languageCode: "en")
     }
 
+    var inputValidationMessage: String? {
+        if endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请填写 Speech Endpoint"
+        }
+        if runtimeSynthesisURL == nil {
+            return "Speech Endpoint 格式不正确，无法识别 Azure 区域"
+        }
+        if apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "请填写 Speech API Key"
+        }
+        return nil
+    }
+
     func parseError(statusCode: Int, data: Data?) -> String {
-        AzureErrorFormatter.message(
+        if statusCode == 401 || statusCode == 403 {
+            return "Speech Key 无效或资源区域不匹配"
+        }
+        if statusCode == 400 {
+            return "自动选择的语音在当前区域不可用"
+        }
+        return AzureErrorFormatter.message(
             statusCode: statusCode,
             data: data,
             service: "Azure Speech",
@@ -323,6 +339,32 @@ struct AzureSpeechConfig: Codable, Equatable {
             }
         }
         return values
+    }
+
+    private var runtimeSynthesisURL: URL? {
+        let clean = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: clean),
+              components.scheme?.lowercased() == "https",
+              let host = components.host?.lowercased(),
+              !host.isEmpty else { return nil }
+
+        if host.hasSuffix(".api.cognitive.microsoft.com") {
+            let suffix = ".api.cognitive.microsoft.com"
+            let region = String(host.dropLast(suffix.count))
+            guard !region.isEmpty,
+                  region.range(of: #"^[a-z0-9-]+$"#, options: .regularExpression) != nil else { return nil }
+            components.host = "\(region).tts.speech.microsoft.com"
+            components.path = "/cognitiveservices/v1"
+            components.query = nil
+            components.fragment = nil
+            return components.url
+        }
+
+        guard host.hasSuffix(".tts.speech.microsoft.com") else { return nil }
+        components.path = "/cognitiveservices/v1"
+        components.query = nil
+        components.fragment = nil
+        return components.url
     }
 
     private static func isValidVoiceName(_ value: String) -> Bool {
@@ -436,557 +478,9 @@ struct AzureOpenAIConfig: Codable, Equatable {
     }
 }
 
-struct Provider: Codable, Equatable {
-    var name: String
-    var format: APIFormat
-    var baseURL: String
-    var apiKey: String
-    var model: String
-    var vision: Bool
-
-    init(
-        name: String,
-        format: APIFormat = .openai,
-        baseURL: String,
-        apiKey: String,
-        model: String,
-        vision: Bool
-    ) {
-        self.name = name
-        self.format = format
-        self.baseURL = baseURL
-        self.apiKey = apiKey
-        self.model = model
-        self.vision = vision
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case name, format, baseURL, apiKey, model, vision
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        self.name = try c.decode(String.self, forKey: .name)
-        self.baseURL = try c.decode(String.self, forKey: .baseURL)
-        self.apiKey = try c.decode(String.self, forKey: .apiKey)
-        self.model = try c.decode(String.self, forKey: .model)
-        self.vision = try c.decode(Bool.self, forKey: .vision)
-        self.format = (try? c.decode(APIFormat.self, forKey: .format)) ?? .openai
-    }
-
-    // 兼容旧属性名
-    var chatURL: String { endpointURL(stream: false) }
-
-    func endpointURL(stream: Bool = false) -> String {
-        var base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        while base.hasSuffix("/") { base.removeLast() }
-
-        let urlPath = URL(string: base)?.path ?? ""
-        let hasOnlyRootPath = urlPath.isEmpty || urlPath == "/"
-
-        switch format {
-        case .openai:
-            if base.hasSuffix("/chat/completions") { return base }
-            if hasOnlyRootPath { return base + "/v1/chat/completions" }
-            return base + "/chat/completions"
-
-        case .anthropic:
-            if base.hasSuffix("/messages") { return base }
-            if hasOnlyRootPath { return base + "/v1/messages" }
-            return base + "/messages"
-
-        case .gemini:
-            if base.contains("/models/") {
-                var normalized = base
-                if let colonRange = normalized.range(of: ":generateContent") ?? normalized.range(of: ":streamGenerateContent") {
-                    normalized = String(normalized[..<colonRange.lowerBound])
-                }
-                return stream ? "\(normalized):streamGenerateContent?alt=sse" : "\(normalized):generateContent"
-            }
-
-            let vBase: String
-            if base.contains("aiplatform.googleapis.com") {
-                if hasOnlyRootPath {
-                    vBase = base + "/v1/publishers/google"
-                } else if !base.contains("/publishers/") {
-                    vBase = base + "/publishers/google"
-                } else {
-                    vBase = base
-                }
-            } else {
-                vBase = hasOnlyRootPath ? (base + "/v1beta") : base
-            }
-            let cleanModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-            let modelPath: String
-            if cleanModel.hasPrefix("publishers/google/models/") && vBase.hasSuffix("/publishers/google") {
-                modelPath = String(cleanModel.dropFirst("publishers/google/".count))
-            } else if cleanModel.hasPrefix("models/") {
-                modelPath = cleanModel
-            } else {
-                modelPath = "models/\(cleanModel)"
-            }
-            if stream {
-                return "\(vBase)/\(modelPath):streamGenerateContent?alt=sse"
-            } else {
-                return "\(vBase)/\(modelPath):generateContent"
-            }
-        }
-    }
-
-    private static func parseDataURL(_ dataURL: String) -> (mimeType: String, base64Data: String)? {
-        guard dataURL.hasPrefix("data:"),
-              let commaIdx = dataURL.firstIndex(of: ",") else { return nil }
-        let meta = String(dataURL[dataURL.index(dataURL.startIndex, offsetBy: 5)..<commaIdx])
-        let b64 = String(dataURL[dataURL.index(after: commaIdx)...])
-        let mime = meta.components(separatedBy: ";").first ?? "image/png"
-        guard !b64.isEmpty else { return nil }
-        return (mime.isEmpty ? "image/png" : mime, b64)
-    }
-
-    func buildRequest(
-        messages: [[String: Any]],
-        temperature: Double,
-        maxTokens: Int,
-        stream: Bool
-    ) -> URLRequest? {
-        guard let url = URL(string: endpointURL(stream: stream)) else { return nil }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if stream {
-            req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        }
-        req.timeoutInterval = stream ? 60 : 30
-
-        let body: [String: Any]
-        switch format {
-        case .openai:
-            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_completion_tokens": maxTokens,
-                "thinking": ["type": "disabled"],
-                "stream": stream
-            ]
-
-        case .anthropic:
-            req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-
-            var systemPrompts: [String] = []
-            var antMessages: [[String: Any]] = []
-
-            for m in messages {
-                guard let role = m["role"] as? String else { continue }
-                if role == "system" {
-                    if let s = m["content"] as? String, !s.isEmpty {
-                        systemPrompts.append(s)
-                    }
-                    continue
-                }
-                if let textContent = m["content"] as? String {
-                    antMessages.append(["role": role, "content": textContent])
-                } else if let blocks = m["content"] as? [[String: Any]] {
-                    var converted: [[String: Any]] = []
-                    for b in blocks {
-                        let bType = b["type"] as? String ?? ""
-                        if bType == "text", let t = b["text"] as? String {
-                            converted.append(["type": "text", "text": t])
-                        } else if bType == "image_url",
-                                  let imgObj = b["image_url"] as? [String: Any],
-                                  let urlStr = imgObj["url"] as? String,
-                                  let parsed = Provider.parseDataURL(urlStr) {
-                            converted.append([
-                                "type": "image",
-                                "source": [
-                                    "type": "base64",
-                                    "media_type": parsed.mimeType,
-                                    "data": parsed.base64Data
-                                ]
-                            ])
-                        }
-                    }
-                    antMessages.append(["role": role, "content": converted])
-                }
-            }
-
-            var b: [String: Any] = [
-                "model": model,
-                "messages": antMessages,
-                "max_tokens": maxTokens,
-                "temperature": temperature,
-                "stream": stream
-            ]
-            if !systemPrompts.isEmpty {
-                b["system"] = systemPrompts.joined(separator: "\n\n")
-            }
-            body = b
-
-        case .gemini:
-            let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedKey.lowercased().hasPrefix("bearer ") {
-                let token = String(trimmedKey.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-                req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            } else if trimmedKey.hasPrefix("ya29.") {
-                req.setValue("Bearer \(trimmedKey)", forHTTPHeaderField: "Authorization")
-            } else {
-                req.setValue(trimmedKey, forHTTPHeaderField: "x-goog-api-key")
-            }
-
-            var systemPrompts: [String] = []
-            var contents: [[String: Any]] = []
-
-            for m in messages {
-                guard let role = m["role"] as? String else { continue }
-                if role == "system" {
-                    if let s = m["content"] as? String, !s.isEmpty {
-                        systemPrompts.append(s)
-                    }
-                    continue
-                }
-                let gemRole = (role == "assistant") ? "model" : "user"
-                if let textContent = m["content"] as? String {
-                    contents.append([
-                        "role": gemRole,
-                        "parts": [["text": textContent]]
-                    ])
-                } else if let blocks = m["content"] as? [[String: Any]] {
-                    var parts: [[String: Any]] = []
-                    for b in blocks {
-                        let bType = b["type"] as? String ?? ""
-                        if bType == "text", let t = b["text"] as? String {
-                            parts.append(["text": t])
-                        } else if bType == "image_url",
-                                  let imgObj = b["image_url"] as? [String: Any],
-                                  let urlStr = imgObj["url"] as? String,
-                                  let parsed = Provider.parseDataURL(urlStr) {
-                            parts.append([
-                                "inline_data": [
-                                    "mime_type": parsed.mimeType,
-                                    "data": parsed.base64Data
-                                ]
-                            ])
-                        }
-                    }
-                    contents.append([
-                        "role": gemRole,
-                        "parts": parts
-                    ])
-                }
-            }
-
-            var b: [String: Any] = [
-                "contents": contents,
-                "generationConfig": [
-                    "temperature": temperature,
-                    "maxOutputTokens": maxTokens
-                ]
-            ]
-            if !systemPrompts.isEmpty {
-                b["systemInstruction"] = [
-                    "parts": [["text": systemPrompts.joined(separator: "\n\n")]]
-                ]
-            }
-            body = b
-        }
-
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
-        req.httpBody = data
-        return req
-    }
-
-    func parseResponse(data: Data) -> String? {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-
-        switch format {
-        case .openai:
-            guard let choices = json["choices"] as? [[String: Any]],
-                  let first = choices.first,
-                  let msg = first["message"] as? [String: Any],
-                  let content = msg["content"] as? String else { return nil }
-            return content
-
-        case .anthropic:
-            guard let content = json["content"] as? [[String: Any]] else { return nil }
-            var accum = ""
-            for block in content {
-                if (block["type"] as? String) == "text", let t = block["text"] as? String {
-                    accum += t
-                }
-            }
-            return accum.isEmpty ? nil : accum
-
-        case .gemini:
-            guard let candidates = json["candidates"] as? [[String: Any]],
-                  let first = candidates.first,
-                  let content = first["content"] as? [String: Any],
-                  let parts = content["parts"] as? [[String: Any]] else { return nil }
-            var accum = ""
-            for part in parts {
-                if (part["thought"] as? Bool) == true { continue }
-                if let t = part["text"] as? String {
-                    accum += t
-                }
-            }
-            return accum.isEmpty ? nil : accum
-        }
-    }
-
-    func parseStreamLine(_ line: String) -> StreamEvent {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed.hasPrefix(":") || trimmed.hasPrefix("event:") {
-            return .ignore
-        }
-        guard trimmed.hasPrefix("data:") else { return .ignore }
-        let payload = trimmed.dropFirst(5).trimmingCharacters(in: .whitespaces)
-        if payload == "[DONE]" { return .done }
-        guard let d = payload.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
-            return .ignore
-        }
-
-        if let errObj = json["error"] as? [String: Any],
-           let msg = errObj["message"] as? String, !msg.isEmpty {
-            return .error(msg)
-        }
-
-        switch format {
-        case .openai:
-            guard let choices = json["choices"] as? [[String: Any]],
-                  let first = choices.first,
-                  let delta = first["delta"] as? [String: Any],
-                  let piece = delta["content"] as? String, !piece.isEmpty else {
-                return .ignore
-            }
-            return .delta(piece)
-
-        case .anthropic:
-            let evType = json["type"] as? String ?? ""
-            if evType == "message_stop" { return .done }
-            if evType == "error" {
-                let msg = (json["error"] as? [String: Any])?["message"] as? String ?? "Anthropic 流式请求出错"
-                return .error(msg)
-            }
-            if evType == "content_block_delta",
-               let delta = json["delta"] as? [String: Any] {
-                let dType = delta["type"] as? String ?? ""
-                if (dType == "text_delta" || dType.isEmpty),
-                   let piece = delta["text"] as? String, !piece.isEmpty {
-                    return .delta(piece)
-                }
-            }
-            return .ignore
-
-        case .gemini:
-            guard let candidates = json["candidates"] as? [[String: Any]],
-                  let first = candidates.first,
-                  let content = first["content"] as? [String: Any],
-                  let parts = content["parts"] as? [[String: Any]] else {
-                return .ignore
-            }
-            var accum = ""
-            for part in parts {
-                if (part["thought"] as? Bool) == true { continue }
-                if let t = part["text"] as? String {
-                    accum += t
-                }
-            }
-            return accum.isEmpty ? .ignore : .delta(accum)
-        }
-    }
-}
-
-struct SupportedLanguage: Equatable {
-    let code: String
-    let displayName: String
-}
-
-final class LegacyAppConfig {
-    static let shared = LegacyAppConfig()
-    static let languagePlaceholder = "<languages>"
-    static let defaultLanguage = "Simplified Chinese"
-
-    static let supportedLanguages: [SupportedLanguage] = [
-        SupportedLanguage(code: "Simplified Chinese", displayName: "简体中文 (Simplified Chinese)"),
-        SupportedLanguage(code: "Traditional Chinese", displayName: "繁體中文 (Traditional Chinese)"),
-        SupportedLanguage(code: "English", displayName: "英语 (English)"),
-        SupportedLanguage(code: "Japanese", displayName: "日语 (Japanese)"),
-        SupportedLanguage(code: "Korean", displayName: "韩语 (Korean)"),
-        SupportedLanguage(code: "Russian", displayName: "俄语 (Russian)"),
-        SupportedLanguage(code: "French", displayName: "法语 (French)"),
-        SupportedLanguage(code: "German", displayName: "德语 (German)"),
-        SupportedLanguage(code: "Spanish", displayName: "西班牙语 (Spanish)"),
-        SupportedLanguage(code: "Portuguese", displayName: "葡萄牙语 (Portuguese)"),
-        SupportedLanguage(code: "Arabic", displayName: "阿拉伯语 (Arabic)")
-    ]
-
-    static let defaultTranslatePrompt = "You are a professional translation engine. Translate the user's text into <languages>. Output ONLY the translation itself — no explanations, no quotes, no extra words."
-
-    static func resolvePrompt(_ prompt: String, language: String) -> String {
-        let lang = language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? defaultLanguage : language
-        return prompt.replacingOccurrences(of: languagePlaceholder, with: lang)
-    }
-
-    private(set) var providers: [Provider] = []
-    private(set) var activeName: String = ""
-    private(set) var language: String = LegacyAppConfig.defaultLanguage
-    private(set) var translatePrompt: String = LegacyAppConfig.defaultTranslatePrompt
-    private var path: String { kConfigDir + "/config.json" }
-
-    var resolvedTranslatePrompt: String {
-        LegacyAppConfig.resolvePrompt(translatePrompt, language: language)
-    }
-
-    // 当前厂商:按名字找;找不到回退第一条(永不为 nil,只要至少一条)
-    var active: Provider? { providers.first { $0.name == activeName } ?? providers.first }
-
-    private struct Stored: Codable {
-        var active: String
-        var providers: [Provider]
-        var language: String?
-        var translatePrompt: String?
-    }
-
-    // 官方支持的四大预置厂商: DeepSeek、Gemini、Vertex AI、MiMo
-    static func presets() -> [Provider] {
-        [
-            Provider(
-                name: "DeepSeek",
-                format: .openai,
-                baseURL: "https://api.deepseek.com/v1",
-                apiKey: "",
-                model: "deepseek-chat",
-                vision: false
-            ),
-            Provider(
-                name: "Gemini",
-                format: .gemini,
-                baseURL: "https://generativelanguage.googleapis.com/v1beta",
-                apiKey: "",
-                model: "gemini-3.8-flash",
-                vision: true
-            ),
-            Provider(
-                name: "Vertex AI",
-                format: .gemini,
-                baseURL: "https://aiplatform.googleapis.com/v1/publishers/google",
-                apiKey: "",
-                model: "gemini-3.8-flash",
-                vision: true
-            ),
-            Provider(
-                name: "MiMo",
-                format: .openai,
-                baseURL: "https://api.xiaomimimo.com/v1",
-                apiKey: "",
-                model: "mimo-v2.5",
-                vision: true
-            )
-        ]
-    }
-
-    // 查询是否为官方内置预设平台
-    static func officialPreset(named name: String) -> Provider? {
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return presets().first { $0.name.lowercased() == trimmed }
-    }
-
-    static func isOfficialPreset(_ name: String) -> Bool {
-        officialPreset(named: name) != nil
-    }
-
-    // 保留用户已有厂商配置(含自定义 API Key / 模型名),并自动补齐缺失的官方预置厂商
-    static func mergeOfficialPresets(into existing: [Provider]) -> [Provider] {
-        var result = existing.map { item -> Provider in
-            if let preset = officialPreset(named: item.name) {
-                return Provider(
-                    name: preset.name,
-                    format: preset.format,
-                    baseURL: preset.baseURL,
-                    apiKey: item.apiKey,
-                    model: item.model.isEmpty ? preset.model : item.model,
-                    vision: item.vision
-                )
-            }
-            return item
-        }
-        for preset in presets() {
-            let exists = result.contains { $0.name.lowercased() == preset.name.lowercased() }
-            if !exists {
-                result.append(preset)
-            }
-        }
-        return result
-    }
-
-    // 启动调用一次。无文件/损坏 → 使用官方预置初始化并落盘;有文件 → 自动补齐新增官方预置与默认字段
-    func load() {
-        let fm = FileManager.default
-        if let data = fm.contents(atPath: path),
-           let stored = try? JSONDecoder().decode(Stored.self, from: data),
-           !stored.providers.isEmpty {
-            let merged = LegacyAppConfig.mergeOfficialPresets(into: stored.providers)
-            providers = merged
-            activeName = stored.active
-            let rawLang = stored.language?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            language = rawLang.isEmpty ? LegacyAppConfig.defaultLanguage : rawLang
-            let rawTrans = stored.translatePrompt?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            translatePrompt = rawTrans.isEmpty ? LegacyAppConfig.defaultTranslatePrompt : (stored.translatePrompt ?? LegacyAppConfig.defaultTranslatePrompt)
-            if merged != stored.providers || stored.language == nil || stored.translatePrompt == nil {
-                save()
-            }
-            return
-        }
-        providers = LegacyAppConfig.presets()
-        activeName = "MiMo"
-        language = LegacyAppConfig.defaultLanguage
-        translatePrompt = LegacyAppConfig.defaultTranslatePrompt
-        save()
-    }
-
-    @discardableResult
-    func save() -> Bool {
-        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let payload = Stored(
-            active: activeName,
-            providers: providers,
-            language: language,
-            translatePrompt: translatePrompt
-        )
-        guard let data = try? enc.encode(payload) else { return false }
-        try? FileManager.default.createDirectory(atPath: kConfigDir, withIntermediateDirectories: true, attributes: nil)
-        do { try data.write(to: URL(fileURLWithPath: path), options: .atomic); return true }
-        catch { return false }
-    }
-
-    // 落盘失败时回滚内存,保证内存与文件一致(避免「界面显示已保存、实际丢了」)
-    @discardableResult
-    func setProviders(_ ps: [Provider], active: String) -> Bool {
-        let oldP = providers, oldA = activeName
-        providers = ps
-        activeName = active
-        if save() { return true }
-        providers = oldP; activeName = oldA
-        return false
-    }
-
-    @discardableResult
-    func setLanguageAndTranslatePrompt(language newLang: String, translatePrompt newTrans: String) -> Bool {
-        let oldL = language, oldT = translatePrompt
-        let cleanL = newLang.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanT = newTrans.trimmingCharacters(in: .whitespacesAndNewlines)
-        language = cleanL.isEmpty ? LegacyAppConfig.defaultLanguage : cleanL
-        translatePrompt = cleanT.isEmpty ? LegacyAppConfig.defaultTranslatePrompt : newTrans
-        if save() { return true }
-        language = oldL; translatePrompt = oldT
-        return false
-    }
-}
-
 final class AppConfig: Codable {
     static let shared = AppConfig()
+    private static var runtimeKeychain = AzureKeychainClient.unavailable
 
     var translator: AzureTranslatorConfig
     var azureOpenAI: AzureOpenAIConfig
@@ -1006,6 +500,66 @@ final class AppConfig: Codable {
 
     private static var defaultURL: URL {
         URL(fileURLWithPath: kConfigDir).appendingPathComponent("config.json")
+    }
+
+    private struct PersistedConfig: Codable {
+        struct Translator: Codable {
+            var endpoint: String
+            var region: String
+        }
+
+        struct OpenAI: Codable {
+            var endpoint: String
+            var deploymentName: String
+            var supportsVision: Bool
+        }
+
+        struct Speech: Codable {
+            var endpoint: String
+        }
+
+        var translator: Translator
+        var azureOpenAI: OpenAI
+        var screenshotHotKey: ScreenshotHotKey
+        var textCommandHotKey: TextCommandHotKey
+        var translationPreferences: TranslationPreferences
+        var speech: Speech
+
+        init(_ config: AppConfig) {
+            translator = Translator(
+                endpoint: config.translator.endpoint,
+                region: config.translator.region
+            )
+            azureOpenAI = OpenAI(
+                endpoint: config.azureOpenAI.endpoint,
+                deploymentName: config.azureOpenAI.deploymentName,
+                supportsVision: config.azureOpenAI.supportsVision
+            )
+            screenshotHotKey = config.screenshotHotKey
+            textCommandHotKey = config.textCommandHotKey
+            translationPreferences = config.translationPreferences
+            speech = Speech(endpoint: config.speech.endpoint)
+        }
+
+        func makeConfig() -> AppConfig {
+            AppConfig(
+                translator: AzureTranslatorConfig(
+                    endpoint: translator.endpoint,
+                    apiKey: "",
+                    region: translator.region
+                ),
+                azureOpenAI: AzureOpenAIConfig(
+                    endpoint: azureOpenAI.endpoint,
+                    apiKey: "",
+                    deploymentName: azureOpenAI.deploymentName,
+                    supportsVision: azureOpenAI.supportsVision
+                ),
+                screenshotHotKey: screenshotHotKey,
+                textCommandHotKey: textCommandHotKey,
+                translationPreferences: translationPreferences,
+                speech: AzureSpeechConfig(endpoint: speech.endpoint, apiKey: "")
+            )
+        }
     }
 
     init(
@@ -1045,7 +599,7 @@ final class AppConfig: Codable {
     }
 
     func load() {
-        let loaded = Self.loadOrCreate(at: Self.defaultURL)
+        let loaded = Self.loadOrCreate(at: Self.defaultURL, keychain: Self.runtimeKeychain)
         translator = loaded.translator
         azureOpenAI = loaded.azureOpenAI
         screenshotHotKey = loaded.screenshotHotKey
@@ -1056,53 +610,261 @@ final class AppConfig: Codable {
 
     @discardableResult
     func save() -> Bool {
-        save(to: Self.defaultURL)
+        save(to: Self.defaultURL, keychain: Self.runtimeKeychain)
     }
 
     @discardableResult
     func save(to url: URL) -> Bool {
+        save(to: url, keychain: Self.runtimeKeychain)
+    }
+
+    static func load(from url: URL) -> AppConfig? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard let config = decodeConfig(from: data) else { return nil }
+        applyRuntimeKeys(to: config, keychain: runtimeKeychain)
+        return config
+    }
+
+    static func loadOrCreate(at url: URL) -> AppConfig {
+        loadOrCreate(at: url, keychain: runtimeKeychain)
+    }
+
+    static func installRuntimeKeychain(_ client: AzureKeychainClient) {
+        runtimeKeychain = client
+    }
+
+    static func loadOrCreate(
+        at url: URL,
+        keychain: AzureKeychainClient
+    ) -> AppConfig {
+        let fileManager = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        let backupURL = directory.appendingPathComponent("config.pre-azure-backup.json")
+        let configData = try? Data(contentsOf: url)
+        let backupData = try? Data(contentsOf: backupURL)
+        let decodedConfig = configData.flatMap(decodeConfig)
+        let decodedBackup = backupData.flatMap(decodeConfig)
+
+        guard let loaded = decodedConfig ?? decodedBackup else {
+            try? secureDirectory(directory, fileManager: fileManager)
+            if let backupData {
+                if containsAPIKeyField(backupData) || !isJSONObject(backupData) {
+                    _ = writePrivateData(
+                        sanitizedLegacyBackupData(from: backupData),
+                        to: backupURL,
+                        fileManager: fileManager
+                    )
+                } else {
+                    try? secureFile(backupURL, fileManager: fileManager)
+                }
+            } else if let configData {
+                _ = writePrivateData(
+                    sanitizedLegacyBackupData(from: configData),
+                    to: backupURL,
+                    fileManager: fileManager
+                )
+            }
+            let defaults = AppConfig()
+            _ = writeSanitized(defaults, to: url, fileManager: fileManager)
+            return defaults
+        }
+
+        let legacyBackup = decodedBackup
+        let keyValues: [(AzureAPIKeySlot, String)] = [
+            (.translator, firstNonEmpty(loaded.translator.apiKey, legacyBackup?.translator.apiKey)),
+            (.openAI, firstNonEmpty(loaded.azureOpenAI.apiKey, legacyBackup?.azureOpenAI.apiKey)),
+            (.speech, firstNonEmpty(loaded.speech.apiKey, legacyBackup?.speech.apiKey))
+        ]
+        var effective: [AzureAPIKeySlot: String] = [:]
+        var pendingWrites: [(AzureAPIKeySlot, String)] = []
+        for (slot, legacyValue) in keyValues {
+            let existing = keychain.read(slot)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !existing.isEmpty {
+                effective[slot] = existing
+            } else if !legacyValue.isEmpty {
+                effective[slot] = legacyValue
+                pendingWrites.append((slot, legacyValue))
+            }
+        }
+
+        let migrationSucceeded = pendingWrites.allSatisfy { pair in
+            keychain.write(pair.1, pair.0)
+        }
+        applyKeys(effective, to: loaded)
+        guard migrationSucceeded else { return loaded }
+
+        let migratedLegacyHotKey = loaded.textCommandHotKey == .legacyDefault
+        if loaded.textCommandHotKey == .legacyDefault {
+            loaded.textCommandHotKey = .default
+        }
+        let needsConfigSanitization = decodedConfig == nil || (configData.map(containsAPIKeyField) ?? false)
+        let needsBackupSanitization = backupData.map(containsAPIKeyField) ?? false
+        if needsConfigSanitization || migratedLegacyHotKey {
+            _ = writeSanitized(loaded, to: url, fileManager: fileManager)
+        } else {
+            try? secureDirectory(directory, fileManager: fileManager)
+            try? secureFile(url, fileManager: fileManager)
+        }
+        if fileManager.fileExists(atPath: backupURL.path) {
+            if needsBackupSanitization {
+                _ = writeSanitized(loaded, to: backupURL, fileManager: fileManager)
+            } else {
+                try? secureFile(backupURL, fileManager: fileManager)
+            }
+        }
+        return loaded
+    }
+
+    @discardableResult
+    private func save(to url: URL, keychain: AzureKeychainClient) -> Bool {
+        let credentials: [(AzureAPIKeySlot, String)] = [
+            (.translator, translator.apiKey),
+            (.openAI, azureOpenAI.apiKey),
+            (.speech, speech.apiKey)
+        ]
+        guard credentials.allSatisfy({ keychain.write($0.1, $0.0) }) else { return false }
+        return Self.writeSanitized(self, to: url, fileManager: .default)
+    }
+
+    private static func decodeConfig(from data: Data) -> AppConfig? {
+        if let legacy = try? JSONDecoder().decode(AppConfig.self, from: data) {
+            return legacy
+        }
+        return (try? JSONDecoder().decode(PersistedConfig.self, from: data))?.makeConfig()
+    }
+
+    private static func applyRuntimeKeys(
+        to config: AppConfig,
+        keychain: AzureKeychainClient
+    ) {
+        var values: [AzureAPIKeySlot: String] = [:]
+        for slot in AzureAPIKeySlot.allCases {
+            if let value = keychain.read(slot), !value.isEmpty {
+                values[slot] = value
+            }
+        }
+        applyKeys(values, to: config)
+    }
+
+    private static func applyKeys(
+        _ values: [AzureAPIKeySlot: String],
+        to config: AppConfig
+    ) {
+        if let value = values[.translator] { config.translator.apiKey = value }
+        if let value = values[.openAI] { config.azureOpenAI.apiKey = value }
+        if let value = values[.speech] { config.speech.apiKey = value }
+    }
+
+    private static func firstNonEmpty(_ values: String?...) -> String {
+        values.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty } ?? ""
+    }
+
+    private static func containsAPIKeyField(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) else { return false }
+        return containsAPIKeyField(object)
+    }
+
+    private static func isJSONObject(_ data: Data) -> Bool {
+        (try? JSONSerialization.jsonObject(with: data)) != nil
+    }
+
+    private static func containsAPIKeyField(_ value: Any) -> Bool {
+        if let dictionary = value as? [String: Any] {
+            for (key, child) in dictionary {
+                let normalized = key.lowercased().filter(\.isLetter)
+                if normalized == "apikey" || normalized == "azureapikey" { return true }
+                if containsAPIKeyField(child) { return true }
+            }
+        } else if let array = value as? [Any] {
+            return array.contains(where: containsAPIKeyField)
+        }
+        return false
+    }
+
+    private static func sanitizedLegacyBackupData(from data: Data) -> Data {
+        let object: Any
+        if let decoded = try? JSONSerialization.jsonObject(with: data) {
+            object = removingAPIKeyFields(from: decoded)
+        } else {
+            object = [
+                "migrationNotice": "Unsupported legacy configuration was replaced; sensitive contents were not retained."
+            ]
+        }
+        return (try? JSONSerialization.data(
+            withJSONObject: object,
+            options: [.prettyPrinted, .sortedKeys]
+        )) ?? Data("{}".utf8)
+    }
+
+    private static func removingAPIKeyFields(from value: Any) -> Any {
+        if let dictionary = value as? [String: Any] {
+            var sanitized: [String: Any] = [:]
+            for (key, child) in dictionary {
+                let normalized = key.lowercased().filter(\.isLetter)
+                guard normalized != "apikey", normalized != "azureapikey" else { continue }
+                sanitized[key] = removingAPIKeyFields(from: child)
+            }
+            return sanitized
+        }
+        if let array = value as? [Any] {
+            return array.map(removingAPIKeyFields)
+        }
+        return value
+    }
+
+    @discardableResult
+    private static func writeSanitized(
+        _ config: AppConfig,
+        to url: URL,
+        fileManager: FileManager
+    ) -> Bool {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(self) else { return false }
+        guard let data = try? encoder.encode(PersistedConfig(config)) else { return false }
         do {
-            try FileManager.default.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
+            try secureDirectory(url.deletingLastPathComponent(), fileManager: fileManager)
             try data.write(to: url, options: .atomic)
+            try secureFile(url, fileManager: fileManager)
             return true
         } catch {
             return false
         }
     }
 
-    static func load(from url: URL) -> AppConfig? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(AppConfig.self, from: data)
+    @discardableResult
+    private static func writePrivateData(
+        _ data: Data,
+        to url: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        do {
+            try secureDirectory(url.deletingLastPathComponent(), fileManager: fileManager)
+            try data.write(to: url, options: .atomic)
+            try secureFile(url, fileManager: fileManager)
+            return true
+        } catch {
+            return false
+        }
     }
 
-    static func loadOrCreate(at url: URL) -> AppConfig {
-        if let loaded = load(from: url) {
-            if loaded.textCommandHotKey == .legacyDefault {
-                loaded.textCommandHotKey = .default
-                _ = loaded.save(to: url)
-            }
-            return loaded
-        }
+    private static func secureDirectory(
+        _ url: URL,
+        fileManager: FileManager
+    ) throws {
+        try fileManager.createDirectory(
+            at: url,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
 
-        let fileManager = FileManager.default
-        try? fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if fileManager.fileExists(atPath: url.path) {
-            let backupURL = url.deletingLastPathComponent()
-                .appendingPathComponent("config.pre-azure-backup.json")
-            if !fileManager.fileExists(atPath: backupURL.path) {
-                try? fileManager.copyItem(at: url, to: backupURL)
-            }
-        }
-
-        let defaults = AppConfig()
-        _ = defaults.save(to: url)
-        return defaults
+    private static func secureFile(
+        _ url: URL,
+        fileManager: FileManager
+    ) throws {
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     @discardableResult

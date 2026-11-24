@@ -32,6 +32,11 @@ enum AzureTestSupport {
         }
         return Dictionary(uniqueKeysWithValues: items.map { ($0.name, $0.value ?? "") })
     }
+
+    static func permissions(at url: URL) -> Int? {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.posixPermissions] as? NSNumber)?.intValue
+    }
 }
 
 final class TestAzureTranslatorTargetLanguage {
@@ -282,10 +287,22 @@ final class TestAzureAppConfigPersistence {
         )
     }
 
-    static func test_saveThenLoad_restoresAzureConfigsFromExplicitFile() {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("glint-azure-config-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: url) }
+    static func test_saveThenLoad_restoresAzureConfigsFromKeychainAndSanitizedFile() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glint-azure-config-\(UUID().uuidString)", isDirectory: true)
+        let url = directory.appendingPathComponent("config.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var keychainValues: [AzureAPIKeySlot: String] = [:]
+        AppConfig.installRuntimeKeychain(
+            AzureKeychainClient(
+                read: { keychainValues[$0] },
+                write: { value, slot in
+                    keychainValues[slot] = value
+                    return true
+                }
+            )
+        )
+        defer { AppConfig.installRuntimeKeychain(.unavailable) }
 
         let original = AppConfig(
             translator: AzureTranslatorConfig(
@@ -302,19 +319,23 @@ final class TestAzureAppConfigPersistence {
         )
         let saved = original.save(to: url)
         let loaded = AppConfig.load(from: url)
+        let persistedText = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
 
         AzureTestSupport.expect(
             saved
                 && loaded?.translator.region == "eastasia"
+                && loaded?.translator.apiKey == "translator-test-key"
                 && loaded?.azureOpenAI.deploymentName == "gpt-5-deployment"
-                && loaded?.azureOpenAI.supportsVision == true,
-            "TestAzureAppConfigPersistence.test_saveThenLoad_restoresAzureConfigsFromExplicitFile"
+                && loaded?.azureOpenAI.apiKey == "gpt-test-key"
+                && loaded?.azureOpenAI.supportsVision == true
+                && !persistedText.contains("apiKey"),
+            "TestAzureAppConfigPersistence.test_saveThenLoad_restoresAzureConfigsFromKeychainAndSanitizedFile"
         )
     }
 }
 
 final class TestAzureAppConfigLegacyBackup {
-    static func test_legacyOrUndecodableConfig_backsUpBeforeCreatingDefaultsWithoutOverwritingExistingBackup() {
+    static func test_unknownOrUndecodableConfig_createsRedactedBackupWithoutOverwritingExistingSafeBackup() {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("glint-azure-config-backup-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -334,6 +355,8 @@ final class TestAzureAppConfigLegacyBackup {
         let firstLoaded = AppConfig.loadOrCreate(at: firstConfigURL)
         let firstPersisted = AppConfig.load(from: firstConfigURL)
         let firstBackupData = try? Data(contentsOf: firstBackupURL)
+        let firstBackupText = firstBackupData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        let firstBackupProviders = AzureTestSupport.jsonDictionary(firstBackupData)?["providers"] as? [[String: Any]]
         let firstCreatedDefaults = firstLoaded.translator == AzureTranslatorConfig()
             && firstLoaded.azureOpenAI == AzureOpenAIConfig()
             && firstPersisted?.translator == AzureTranslatorConfig()
@@ -357,11 +380,15 @@ final class TestAzureAppConfigLegacyBackup {
             && secondPersisted?.azureOpenAI == AzureOpenAIConfig()
 
         AzureTestSupport.expect(
-            firstBackupData == legacyData
+            firstBackupData != legacyData
+                && !firstBackupText.contains("fictional-old-key")
+                && !firstBackupText.contains("apiKey")
+                && firstBackupProviders?.first?["name"] as? String == "MiMo"
+                && AzureTestSupport.permissions(at: firstBackupURL) == 0o600
                 && firstCreatedDefaults
                 && secondBackupData == existingBackupData
                 && secondCreatedDefaults,
-            "TestAzureAppConfigLegacyBackup.test_legacyOrUndecodableConfig_backsUpBeforeCreatingDefaultsWithoutOverwritingExistingBackup"
+            "TestAzureAppConfigLegacyBackup.test_unknownOrUndecodableConfig_createsRedactedBackupWithoutOverwritingExistingSafeBackup"
         )
     }
 }
@@ -431,8 +458,8 @@ enum AzureServicesTests {
         TestAzureErrorParsing.test_jsonError_includesCodeAndMessageButRedactsCredentials()
         TestAzureErrorParsing.test_nonJsonError_reportsStatusWithoutLeakingResponseHeadersOrKey()
         TestAzureAppConfigPersistence.test_azureConfigs_codableRoundTripPreservesBothServices()
-        TestAzureAppConfigPersistence.test_saveThenLoad_restoresAzureConfigsFromExplicitFile()
-        TestAzureAppConfigLegacyBackup.test_legacyOrUndecodableConfig_backsUpBeforeCreatingDefaultsWithoutOverwritingExistingBackup()
+        TestAzureAppConfigPersistence.test_saveThenLoad_restoresAzureConfigsFromKeychainAndSanitizedFile()
+        TestAzureAppConfigLegacyBackup.test_unknownOrUndecodableConfig_createsRedactedBackupWithoutOverwritingExistingSafeBackup()
         TestAzureConnectionProbeRequest.test_unsavedTranslatorValues_buildMinimalRealTranslationProbe()
         TestAzureConnectionProbeRequest.test_unsavedGptValues_buildMinimalNonStreamingChatProbe()
 

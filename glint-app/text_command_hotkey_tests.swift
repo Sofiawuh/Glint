@@ -24,6 +24,20 @@ enum TextCommandHotKeyTestSupport {
     }
 }
 
+final class TextCommandHotKeyTestKeychainStore {
+    private var values: [AzureAPIKeySlot: String] = [:]
+
+    var client: AzureKeychainClient {
+        AzureKeychainClient(
+            read: { [weak self] in self?.values[$0] },
+            write: { [weak self] value, slot in
+                self?.values[slot] = value
+                return self != nil
+            }
+        )
+    }
+}
+
 final class TestTextCommandHotKeyRegistration: TextCommandHotKeyRegistration {
     let hotKey: TextCommandHotKey
     private let action: () -> Void
@@ -203,6 +217,9 @@ final class TestTextCommandHotKeyValueAndMigration {
             .appendingPathComponent("glint-text-command-old-default-\(UUID().uuidString)", isDirectory: true)
         let configURL = directory.appendingPathComponent("config.json")
         defer { try? FileManager.default.removeItem(at: directory) }
+        let keychain = TextCommandHotKeyTestKeychainStore()
+        AppConfig.installRuntimeKeychain(keychain.client)
+        defer { AppConfig.installRuntimeKeychain(.unavailable) }
 
         let customScreenshot = ScreenshotHotKey(
             keyCode: UInt32(kVK_ANSI_Q),
@@ -243,6 +260,9 @@ final class TestTextCommandHotKeyValueAndMigration {
             .appendingPathComponent("glint-text-command-custom-\(UUID().uuidString)", isDirectory: true)
         let configURL = directory.appendingPathComponent("config.json")
         defer { try? FileManager.default.removeItem(at: directory) }
+        let keychain = TextCommandHotKeyTestKeychainStore()
+        AppConfig.installRuntimeKeychain(keychain.client)
+        defer { AppConfig.installRuntimeKeychain(.unavailable) }
 
         let customTextCommand = TextCommandHotKey(
             keyCode: UInt32(kVK_ANSI_K),

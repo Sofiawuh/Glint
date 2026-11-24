@@ -9,6 +9,28 @@ let kCursorOffsetX: CGFloat = 8   // 浮窗左缘相对光标向右偏移
 let kCursorOffsetY: CGFloat = 8   // 浮窗上缘相对光标向下偏移
 let kTextCommandOffset: CGFloat = 12
 
+func textCommandPanelVisibleFrame(
+    mouseLocation: CGPoint,
+    availableVisibleFrames: [CGRect],
+    mainVisibleFrame: CGRect?
+) -> CGRect? {
+    if let exact = availableVisibleFrames.first(where: { $0.contains(mouseLocation) }) {
+        return exact
+    }
+    if let nearest = availableVisibleFrames.min(by: {
+        squaredDistance(mouseLocation, to: $0) < squaredDistance(mouseLocation, to: $1)
+    }) {
+        return nearest
+    }
+    return mainVisibleFrame
+}
+
+private func squaredDistance(_ point: CGPoint, to rect: CGRect) -> CGFloat {
+    let dx = max(rect.minX - point.x, 0, point.x - rect.maxX)
+    let dy = max(rect.minY - point.y, 0, point.y - rect.maxY)
+    return dx * dx + dy * dy
+}
+
 // 将任意浮窗矩形严格夹紧在屏幕可视区 visibleFrame 内(四边保留 kScreenEdgeGap 间距)。
 func clampRectToVisible(_ rect: NSRect, visible vf: CGRect) -> NSRect {
     var r = rect

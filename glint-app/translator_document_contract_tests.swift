@@ -5,8 +5,10 @@ import Foundation
 //
 // 预期最小运行命令（生产契约存在后）：
 //   swiftc -o /tmp/glint_translator_document_contract_test \
-//     TranslationDocument.swift translator_document_contract_tests.swift \
-//     -framework Foundation && /tmp/glint_translator_document_contract_test
+//     TranslationDocument.swift TranslationFormatting.swift Config.swift \
+//     ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift \
+//     translator_document_contract_tests.swift -framework Carbon -framework Foundation \
+//     && /tmp/glint_translator_document_contract_test
 
 enum TranslatorDocumentContractTestSupport {
     static var failures = 0
@@ -107,6 +109,89 @@ final class TestTranslationDocumentSegmentation {
                 }
                 && oversized?.text == "This single fragment is deliberately longer than the fictional budget.",
             "TestTranslationDocumentSegmentation.test_itemAndCharacterBudgets_batchAtFragmentBoundariesWithoutTruncatingOversizedFragment"
+        )
+    }
+
+    static func test_unicodeListMarkers_areExcludedFromTranslatorPayloadAndRestoredByteForByte() {
+        let input = """
+        • Alpha item
+        ◦ Beta item
+        ▪ Gamma item
+        ‣ Delta item
+        – Epsilon item
+        """
+        let document = TranslationDocument(formattedText: input)
+        let expectedBodies = [
+            "Alpha item",
+            "Beta item",
+            "Gamma item",
+            "Delta item",
+            "Epsilon item"
+        ]
+        let translations = [
+            "Alpha item": "甲项目",
+            "Beta item": "乙项目",
+            "Gamma item": "丙项目",
+            "Delta item": "丁项目",
+            "Epsilon item": "戊项目"
+        ]
+        let responses = document.fragments.map { fragment in
+            TranslationFragmentResponse(
+                id: fragment.id,
+                translatedText: translations[fragment.text] ?? fragment.text,
+                detectedLanguage: "en"
+            )
+        }
+        let result = document.reassemble(responses)
+        let expected = """
+        • 甲项目
+        ◦ 乙项目
+        ▪ 丙项目
+        ‣ 丁项目
+        – 戊项目
+        """
+
+        TranslatorDocumentContractTestSupport.expect(
+            document.fragments.map(\.text) == expectedBodies
+                && document.fragments.allSatisfy { fragment in
+                    !fragment.text.contains("•")
+                        && !fragment.text.contains("◦")
+                        && !fragment.text.contains("▪")
+                        && !fragment.text.contains("‣")
+                        && !fragment.text.contains("–")
+                }
+                && result?.text == expected,
+            "TestTranslationDocumentSegmentation.test_unicodeListMarkers_areExcludedFromTranslatorPayloadAndRestoredByteForByte"
+        )
+    }
+
+    static func test_singleFragmentOverAzureBudget_isLosslesslySplitIntoBuildableRequests() {
+        let input = String(repeating: "A", count: 45_001)
+        let document = TranslationDocument(formattedText: input)
+        let batches = document.batches(limits: .azureDefault)
+        let translator = AzureTranslatorConfig(
+            endpoint: "https://translator.example.invalid",
+            apiKey: "fictional-translator-key",
+            region: "fictional-region"
+        )
+        let responses = document.fragments.map {
+            TranslationFragmentResponse(
+                id: $0.id,
+                translatedText: $0.text,
+                detectedLanguage: "en"
+            )
+        }
+
+        TranslatorDocumentContractTestSupport.expect(
+            document.fragments.count > 1
+                && batches.count > 1
+                && batches.allSatisfy {
+                    !$0.isEmpty
+                        && $0.reduce(0) { $0 + $1.text.count } <= TranslationBatchLimits.azureDefault.maxCharacters
+                        && translator.buildRequest(fragments: $0, targetLanguage: "zh-Hans") != nil
+                }
+                && document.reassemble(responses)?.text == input,
+            "TestTranslationDocumentSegmentation.test_singleFragmentOverAzureBudget_isLosslesslySplitIntoBuildableRequests"
         )
     }
 }
@@ -356,6 +441,8 @@ enum TranslatorDocumentContractTests {
     static func main() {
         TestTranslationDocumentSegmentation.test_structuredText_extractsOnlyTranslatableContentWithStableUniqueIDs()
         TestTranslationDocumentSegmentation.test_itemAndCharacterBudgets_batchAtFragmentBoundariesWithoutTruncatingOversizedFragment()
+        TestTranslationDocumentSegmentation.test_unicodeListMarkers_areExcludedFromTranslatorPayloadAndRestoredByteForByte()
+        TestTranslationDocumentSegmentation.test_singleFragmentOverAzureBudget_isLosslesslySplitIntoBuildableRequests()
         TestTranslationDocumentReassembly.test_shuffledResponses_reassembleByStableIDAndPreserveEveryStructureMarker()
         TestTranslationDocumentReassembly.test_missingOrUnknownResponseID_refusesPartialOrCorruptReassembly()
         TestTranslationDocumentTabularProtection.test_tabSeparatedCells_areIndependentFragmentsAndProtectedValuesNeverReachTranslatorRaw()

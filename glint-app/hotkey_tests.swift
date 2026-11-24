@@ -484,11 +484,22 @@ final class TestHotKeyAppConfigMigration {
         )
     }
 
-    static func test_newConfig_codableAndFileRoundTripPreservesAllFields() {
+    static func test_newConfig_fileRoundTripUsesKeychainAndSanitizesJSON() {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("glint-hotkey-roundtrip-\(UUID().uuidString)", isDirectory: true)
         let configURL = directory.appendingPathComponent("config.json")
         defer { try? FileManager.default.removeItem(at: directory) }
+        var keychainValues: [AzureAPIKeySlot: String] = [:]
+        AppConfig.installRuntimeKeychain(
+            AzureKeychainClient(
+                read: { keychainValues[$0] },
+                write: { value, slot in
+                    keychainValues[slot] = value
+                    return true
+                }
+            )
+        )
+        defer { AppConfig.installRuntimeKeychain(.unavailable) }
 
         let hotKey = ScreenshotHotKey(
             keyCode: UInt32(kVK_ANSI_7),
@@ -503,6 +514,7 @@ final class TestHotKeyAppConfigMigration {
         let decoded = encoded.flatMap { try? JSONDecoder().decode(AppConfig.self, from: $0) }
         let saved = original.save(to: configURL)
         let loaded = AppConfig.load(from: configURL)
+        let persistedText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
 
         HotKeyTestSupport.expect(
             decoded?.translator == translator
@@ -511,8 +523,11 @@ final class TestHotKeyAppConfigMigration {
                 && saved
                 && loaded?.translator == translator
                 && loaded?.azureOpenAI == gpt
-                && loaded?.screenshotHotKey == hotKey,
-            "TestHotKeyAppConfigMigration.test_newConfig_codableAndFileRoundTripPreservesAllFields"
+                && loaded?.screenshotHotKey == hotKey
+                && !persistedText.contains("apiKey")
+                && keychainValues[.translator] == translator.apiKey
+                && keychainValues[.openAI] == gpt.apiKey,
+            "TestHotKeyAppConfigMigration.test_newConfig_fileRoundTripUsesKeychainAndSanitizesJSON"
         )
     }
 }
@@ -977,7 +992,7 @@ enum HotKeyTests {
             .test_unmodifiedGraveAndFunctionKeys_commitWithoutAddingModifiers()
 
         TestHotKeyAppConfigMigration.test_missingHotKeyField_loadsDefaultWithoutBackupAndPreservesAzureValues()
-        TestHotKeyAppConfigMigration.test_newConfig_codableAndFileRoundTripPreservesAllFields()
+        TestHotKeyAppConfigMigration.test_newConfig_fileRoundTripUsesKeychainAndSanitizesJSON()
 
         TestHotKeyTransaction.test_success_candidateIsInactiveUntilSaveAndOldKeyUnregisterThenOnlyNewKeyFires()
         TestHotKeyTransaction.test_sameValue_isSuccessfulNoOpWithoutRegistrationOrSave()

@@ -13,6 +13,8 @@ import Foundation
 
 enum AzureSpeechContractTestSupport {
     static var failures = 0
+    static let standardEndpoint = "https://fictional-eastus.tts.speech.microsoft.com/cognitiveservices/v1"
+    static let portalEndpoint = "https://fictional-eastus.api.cognitive.microsoft.com/"
 
     static func expect(_ condition: @autoclosure () -> Bool, _ name: String) {
         if condition() {
@@ -32,9 +34,8 @@ enum AzureSpeechContractTestSupport {
 final class TestAzureSpeechVoiceMapping {
     static func test_automaticVoice_mapsSupportedLanguageCodesToNeuralVoices() {
         let config = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-            apiKey: "fictional-speech-key",
-            voice: AzureSpeechConfig.automaticVoice
+            endpoint: AzureSpeechContractTestSupport.standardEndpoint,
+            apiKey: "fictional-speech-key"
         )
 
         AzureSpeechContractTestSupport.expect(
@@ -48,36 +49,37 @@ final class TestAzureSpeechVoiceMapping {
         )
     }
 
-    static func test_explicitVoice_overridesAutomaticLanguageMapping() {
+    static func test_legacyExplicitVoice_isIgnoredAndLanguageMappingAlwaysWins() {
         let config = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
+            endpoint: AzureSpeechContractTestSupport.standardEndpoint,
             apiKey: "fictional-speech-key",
             voice: "en-GB-SoniaNeural"
         )
 
         AzureSpeechContractTestSupport.expect(
-            config.voiceName(for: "zh-Hans") == "en-GB-SoniaNeural",
-            "TestAzureSpeechVoiceMapping.test_explicitVoice_overridesAutomaticLanguageMapping"
+            config.voiceName(for: "zh-Hans") == "zh-CN-XiaoxiaoNeural"
+                && config.voiceName(for: "ja") == "ja-JP-NanamiNeural"
+                && config.voice == AzureSpeechConfig.automaticVoice,
+            "TestAzureSpeechVoiceMapping.test_legacyExplicitVoice_isIgnoredAndLanguageMappingAlwaysWins"
         )
     }
 
-    static func test_validBritishVoice_buildsRequestWithMatchingNameAndLanguage() {
+    static func test_languageCode_buildsRequestWithMatchingAutomaticNameAndLocale() {
         let config = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-            apiKey: "fictional-speech-key",
-            voice: "en-GB-SoniaNeural"
+            endpoint: AzureSpeechContractTestSupport.standardEndpoint,
+            apiKey: "fictional-speech-key"
         )
         let request = config.buildSynthesisRequest(
-            text: "Synthetic British voice sample.",
-            languageCode: "en-GB"
+            text: "Synthetic Japanese voice sample.",
+            languageCode: "ja"
         )
         let body = AzureSpeechContractTestSupport.body(request)
 
         AzureSpeechContractTestSupport.expect(
             request != nil
-                && body.contains("name=\"en-GB-SoniaNeural\"")
-                && body.contains("xml:lang=\"en-GB\""),
-            "TestAzureSpeechVoiceMapping.test_validBritishVoice_buildsRequestWithMatchingNameAndLanguage"
+                && body.contains("name=\"ja-JP-NanamiNeural\"")
+                && body.contains("xml:lang=\"ja-JP\""),
+            "TestAzureSpeechVoiceMapping.test_languageCode_buildsRequestWithMatchingAutomaticNameAndLocale"
         )
     }
 }
@@ -131,9 +133,8 @@ final class TestSpeechTextFormatting {
         """
         let spoken = SpeechTextFormatter.speechText(from: source)
         let config = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-            apiKey: "fictional-speech-key",
-            voice: AzureSpeechConfig.automaticVoice
+            endpoint: AzureSpeechContractTestSupport.standardEndpoint,
+            apiKey: "fictional-speech-key"
         )
         let rawRequest = config.buildSynthesisRequest(text: source, languageCode: "en")
         let cleanRequest = config.buildSynthesisRequest(text: spoken, languageCode: "en")
@@ -160,9 +161,8 @@ final class TestSpeechTextFormatting {
 final class TestAzureSpeechRequest {
     static func test_synthesisRequest_usesConfiguredEndpointHeadersAudioFormatAndEscapedSSML() {
         let config = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-            apiKey: "fictional-speech-key",
-            voice: AzureSpeechConfig.automaticVoice
+            endpoint: AzureSpeechContractTestSupport.portalEndpoint,
+            apiKey: "fictional-speech-key"
         )
         let request = config.buildSynthesisRequest(
             text: "A&B <tag> \"quoted\" 'apostrophe'\n\nSecond paragraph.",
@@ -171,7 +171,7 @@ final class TestAzureSpeechRequest {
         let body = AzureSpeechContractTestSupport.body(request)
 
         AzureSpeechContractTestSupport.expect(
-            request?.url?.absoluteString == "https://speech.invalid.example/cognitiveservices/v1"
+            request?.url?.absoluteString == AzureSpeechContractTestSupport.standardEndpoint
                 && request?.httpMethod == "POST"
                 && request?.value(forHTTPHeaderField: "Ocp-Apim-Subscription-Key") == "fictional-speech-key"
                 && request?.value(forHTTPHeaderField: "Content-Type") == "application/ssml+xml"
@@ -188,9 +188,8 @@ final class TestAzureSpeechRequest {
 
     static func test_probeRequest_usesFixedMinimalTextAndNeverIncludesCallerContent() {
         let config = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-            apiKey: "fictional-speech-key",
-            voice: AzureSpeechConfig.automaticVoice
+            endpoint: AzureSpeechContractTestSupport.standardEndpoint,
+            apiKey: "fictional-speech-key"
         )
         let request = config.buildProbeRequest()
         let body = AzureSpeechContractTestSupport.body(request)
@@ -206,11 +205,10 @@ final class TestAzureSpeechRequest {
     }
 
     static func test_missingEndpointOrKey_refusesToBuildRequest() {
-        let missingEndpoint = AzureSpeechConfig(endpoint: "", apiKey: "fictional-key", voice: AzureSpeechConfig.automaticVoice)
+        let missingEndpoint = AzureSpeechConfig(endpoint: "", apiKey: "fictional-key")
         let missingKey = AzureSpeechConfig(
-            endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-            apiKey: "",
-            voice: AzureSpeechConfig.automaticVoice
+            endpoint: AzureSpeechContractTestSupport.standardEndpoint,
+            apiKey: ""
         )
 
         AzureSpeechContractTestSupport.expect(
@@ -220,7 +218,7 @@ final class TestAzureSpeechRequest {
         )
     }
 
-    static func test_unsafeExplicitVoiceValues_refuseRequestInsteadOfEnteringSSMLAttributes() {
+    static func test_legacyUnsafeVoiceValues_areIgnoredAndNeverEnterSSMLAttributes() {
         let unsafeVoices = [
             "en-US-Jenny\"Neural",
             "en-US-Jenny&Neural",
@@ -232,47 +230,50 @@ final class TestAzureSpeechRequest {
             "en-US-JennyNeural\"/><voice name=\"injected"
         ]
 
-        let allRejected = unsafeVoices.allSatisfy { voice in
+        let allIgnored = unsafeVoices.allSatisfy { voice in
             let config = AzureSpeechConfig(
-                endpoint: "https://speech.invalid.example/cognitiveservices/v1",
+                endpoint: AzureSpeechContractTestSupport.standardEndpoint,
                 apiKey: "fictional-speech-key",
                 voice: voice
             )
-            return config.buildSynthesisRequest(
+            let request = config.buildSynthesisRequest(
                 text: "Synthetic voice validation text.",
                 languageCode: "en"
-            ) == nil
+            )
+            let body = AzureSpeechContractTestSupport.body(request)
+            return request != nil
+                && body.contains("name=\"en-US-JennyNeural\"")
+                && !body.contains(voice)
         }
 
         AzureSpeechContractTestSupport.expect(
-            allRejected,
-            "TestAzureSpeechRequest.test_unsafeExplicitVoiceValues_refuseRequestInsteadOfEnteringSSMLAttributes"
+            allIgnored,
+            "TestAzureSpeechRequest.test_legacyUnsafeVoiceValues_areIgnoredAndNeverEnterSSMLAttributes"
         )
     }
 }
 
 final class TestAzureSpeechErrorSanitization {
-    static func test_serviceError_preservesSafeCodeButRedactsKeyAndEchoedQueryValues() {
+    static func test_authenticationError_returnsSpecificSafeMessageAndRedactsSecrets() {
         let key = "fictional-speech-key-never-log"
         let querySecret = "fictional-query-secret"
         let queryToken = "fictional-token-value"
-        let endpoint = "https://speech.invalid.example/cognitiveservices/v1?sig=\(querySecret)&token=\(queryToken)"
+        let endpoint = "\(AzureSpeechContractTestSupport.standardEndpoint)?sig=\(querySecret)&token=\(queryToken)"
         let config = AzureSpeechConfig(
             endpoint: endpoint,
-            apiKey: key,
-            voice: AzureSpeechConfig.automaticVoice
+            apiKey: key
         )
         let data = #"{"error":{"code":"Unauthorized","message":"fictional-query-secret fictional-token-value fictional-speech-key-never-log"}}"#
             .data(using: .utf8)!
         let message = config.parseError(statusCode: 401, data: data)
 
         AzureSpeechContractTestSupport.expect(
-            message.contains("Unauthorized")
+            message == "Speech Key 无效或资源区域不匹配"
                 && !message.contains(key)
                 && !message.contains(querySecret)
                 && !message.contains(queryToken)
                 && !message.contains("?sig="),
-            "TestAzureSpeechErrorSanitization.test_serviceError_preservesSafeCodeButRedactsKeyAndEchoedQueryValues"
+            "TestAzureSpeechErrorSanitization.test_authenticationError_returnsSpecificSafeMessageAndRedactsSecrets"
         )
     }
 
@@ -281,11 +282,10 @@ final class TestAzureSpeechErrorSanitization {
         let key = "fictional-speech-key-never-log"
         let querySecret = "fictional-query-secret"
         let queryToken = "fictional-token-value"
-        let endpoint = "https://speech.invalid.example/cognitiveservices/v1?sig=\(querySecret)&token=\(queryToken)"
+        let endpoint = "\(AzureSpeechContractTestSupport.standardEndpoint)?sig=\(querySecret)&token=\(queryToken)"
         let config = AzureSpeechConfig(
             endpoint: endpoint,
-            apiKey: key,
-            voice: AzureSpeechConfig.automaticVoice
+            apiKey: key
         )
         let error = NSError(
             domain: NSURLErrorDomain,
@@ -315,8 +315,8 @@ final class TestAzureSpeechErrorSanitization {
 enum AzureSpeechContractTests {
     static func main() {
         TestAzureSpeechVoiceMapping.test_automaticVoice_mapsSupportedLanguageCodesToNeuralVoices()
-        TestAzureSpeechVoiceMapping.test_explicitVoice_overridesAutomaticLanguageMapping()
-        TestAzureSpeechVoiceMapping.test_validBritishVoice_buildsRequestWithMatchingNameAndLanguage()
+        TestAzureSpeechVoiceMapping.test_legacyExplicitVoice_isIgnoredAndLanguageMappingAlwaysWins()
+        TestAzureSpeechVoiceMapping.test_languageCode_buildsRequestWithMatchingAutomaticNameAndLocale()
         #if !GLINT_CONTRACT_SKIP_SPEECH_TEXT
         TestSpeechTextFormatting.test_speechText_removesMarkdownStructureButPreservesBodyBlankLinesNumbersAndURL()
         TestSpeechTextFormatting.test_synthesisRequest_usesCleanSpeechTextInsteadOfRawEditorMarkdown()
@@ -324,8 +324,8 @@ enum AzureSpeechContractTests {
         TestAzureSpeechRequest.test_synthesisRequest_usesConfiguredEndpointHeadersAudioFormatAndEscapedSSML()
         TestAzureSpeechRequest.test_probeRequest_usesFixedMinimalTextAndNeverIncludesCallerContent()
         TestAzureSpeechRequest.test_missingEndpointOrKey_refusesToBuildRequest()
-        TestAzureSpeechRequest.test_unsafeExplicitVoiceValues_refuseRequestInsteadOfEnteringSSMLAttributes()
-        TestAzureSpeechErrorSanitization.test_serviceError_preservesSafeCodeButRedactsKeyAndEchoedQueryValues()
+        TestAzureSpeechRequest.test_legacyUnsafeVoiceValues_areIgnoredAndNeverEnterSSMLAttributes()
+        TestAzureSpeechErrorSanitization.test_authenticationError_returnsSpecificSafeMessageAndRedactsSecrets()
         #if !GLINT_CONTRACT_SKIP_NETWORK_ERROR
         TestAzureSpeechErrorSanitization.test_networkError_preservesSafeDescriptionButRedactsEndpointQueryAndKey()
         #endif

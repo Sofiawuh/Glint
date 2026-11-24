@@ -638,9 +638,17 @@ final class CodeBlockLayoutManager: NSLayoutManager {
 
 // 画一条满宽暖色细线的附件 cell(给 markdown 的 --- 用)
 final class HRCell: NSTextAttachmentCell {
+    private static let widthCodingKey = "GlintHRCellWidth"
     private let w: CGFloat
     init(width: CGFloat) { self.w = max(10, width); super.init() }
-    required init(coder: NSCoder) { fatalError() }
+    required init(coder: NSCoder) {
+        self.w = max(10, CGFloat(coder.decodeDouble(forKey: Self.widthCodingKey)))
+        super.init(coder: coder)
+    }
+    override func encode(with coder: NSCoder) {
+        super.encode(with: coder)
+        coder.encode(Double(w), forKey: Self.widthCodingKey)
+    }
     override func cellSize() -> NSSize { NSSize(width: w, height: 9) }
     override func draw(withFrame cellFrame: NSRect, in controlView: NSView?) {
         let y = cellFrame.midY.rounded() + 0.5

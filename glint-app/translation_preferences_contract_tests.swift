@@ -1,6 +1,6 @@
 import Foundation
 
-// 翻译偏好与 Speech 配置持久化黑盒契约测试（不进入 App 打包）。
+// 翻译工作台最后选择与 Speech 两字段配置持久化黑盒契约测试（不进入 App 打包）。
 // 仅使用临时文件和明显虚构配置，不读取真实 ~/.config/glint/config.json。
 //
 // 预期最小运行命令（生产契约存在后）：
@@ -26,6 +26,26 @@ enum TranslationPreferencesContractTestSupport {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("glint-smart-translation-\(UUID().uuidString)", isDirectory: true)
             .appendingPathComponent("config.json")
+    }
+
+    static func storedSpeechObject(at url: URL) -> [String: Any]? {
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return root["speech"] as? [String: Any]
+    }
+}
+
+final class TranslationPreferencesTestKeychainStore {
+    private var values: [AzureAPIKeySlot: String] = [:]
+
+    var client: AzureKeychainClient {
+        AzureKeychainClient(
+            read: { [weak self] in self?.values[$0] },
+            write: { [weak self] value, slot in
+                self?.values[slot] = value
+                return self != nil
+            }
+        )
     }
 }
 
@@ -97,12 +117,37 @@ final class TestTranslationPreferencesMigration {
             "TestTranslationPreferencesMigration.test_legacyConfigMissingNewFields_decodesDefaultsAndPreservesExistingServicesAndHotKeys"
         )
     }
+
+    static func test_legacySpeechRegionAndVoice_decodeAsTwoFieldsWithAutomaticVoice() {
+        let legacySpeechJSON = #"{"endpoint":"https://fictional-eastus.api.cognitive.microsoft.com/","apiKey":"fictional-speech-key","region":"fictional-eastus","voice":"en-GB-SoniaNeural"}"#
+            .data(using: .utf8)!
+        let decoded = try? JSONDecoder().decode(AzureSpeechConfig.self, from: legacySpeechJSON)
+        let reencoded = decoded.flatMap { try? JSONEncoder().encode($0) }
+        let object = reencoded.flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        }
+        let keys = Set(object.map { Array($0.keys) } ?? [])
+
+        TranslationPreferencesContractTestSupport.expect(
+            decoded?.endpoint == "https://fictional-eastus.api.cognitive.microsoft.com/"
+                && decoded?.apiKey == "fictional-speech-key"
+                && decoded?.voice == AzureSpeechConfig.automaticVoice
+                && decoded?.voiceName(for: "zh-Hans") == "zh-CN-XiaoxiaoNeural"
+                && keys == Set(["endpoint", "apiKey"])
+                && object?["voice"] == nil
+                && object?["region"] == nil,
+            "TestTranslationPreferencesMigration.test_legacySpeechRegionAndVoice_decodeAsTwoFieldsWithAutomaticVoice"
+        )
+    }
 }
 
 final class TestTranslationPreferencesPersistence {
-    static func test_saveThenLoad_roundTripsFixedTargetFormattingAndSpeechIndependently() {
+    static func test_saveThenLoad_roundTripsWorkbenchTargetProcessingAndSpeechTwoFieldsIndependently() {
         let url = TranslationPreferencesContractTestSupport.temporaryConfigURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let keychain = TranslationPreferencesTestKeychainStore()
+        AppConfig.installRuntimeKeychain(keychain.client)
+        defer { AppConfig.installRuntimeKeychain(.unavailable) }
 
         let original = AppConfig(
             translator: AzureTranslatorConfig(
@@ -124,12 +169,11 @@ final class TestTranslationPreferencesPersistence {
             translationPreferences: TranslationPreferences(
                 targetMode: .fixed,
                 fixedTargetLanguage: "de",
-                formattingMode: .strict
+                formattingMode: .polish
             ),
             speech: AzureSpeechConfig(
-                endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-                apiKey: "fictional-speech-key",
-                voice: AzureSpeechConfig.automaticVoice
+                endpoint: "https://fictional-eastus.api.cognitive.microsoft.com/",
+                apiKey: "fictional-speech-key"
             )
         )
 
@@ -140,20 +184,24 @@ final class TestTranslationPreferencesPersistence {
             saved
                 && loaded?.translationPreferences.targetMode == .fixed
                 && loaded?.translationPreferences.fixedTargetLanguage == "de"
-                && loaded?.translationPreferences.formattingMode == .strict
-                && loaded?.speech.endpoint == "https://speech.invalid.example/cognitiveservices/v1"
+                && loaded?.translationPreferences.formattingMode == .polish
+                && loaded?.speech.endpoint == "https://fictional-eastus.api.cognitive.microsoft.com/"
                 && loaded?.speech.apiKey == "fictional-speech-key"
+                && loaded?.speech.voice == AzureSpeechConfig.automaticVoice
                 && loaded?.translator.region == "fictional-region"
                 && loaded?.azureOpenAI.deploymentName == "fictional-deployment"
                 && loaded?.screenshotHotKey.keyCode == 14
                 && loaded?.textCommandHotKey.keyCode == 50,
-            "TestTranslationPreferencesPersistence.test_saveThenLoad_roundTripsFixedTargetFormattingAndSpeechIndependently"
+            "TestTranslationPreferencesPersistence.test_saveThenLoad_roundTripsWorkbenchTargetProcessingAndSpeechTwoFieldsIndependently"
         )
     }
 
-    static func test_setTranslationPreferences_commitsOnlyPreferencesAndPersistsAtomically() {
+    static func test_setWorkbenchSelection_commitsOnlyPreferencesAndPersistsAtomically() {
         let url = TranslationPreferencesContractTestSupport.temporaryConfigURL()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let keychain = TranslationPreferencesTestKeychainStore()
+        AppConfig.installRuntimeKeychain(keychain.client)
+        defer { AppConfig.installRuntimeKeychain(.unavailable) }
 
         let config = AppConfig(
             translator: AzureTranslatorConfig(
@@ -178,19 +226,20 @@ final class TestTranslationPreferencesPersistence {
                 formattingMode: .smart
             ),
             speech: AzureSpeechConfig(
-                endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-                apiKey: "fictional-speech-key",
-                voice: "en-GB-SoniaNeural"
+                endpoint: "https://fictional-eastus.api.cognitive.microsoft.com/",
+                apiKey: "fictional-speech-key"
             )
         )
         let updated = TranslationPreferences(
             targetMode: .fixed,
             fixedTargetLanguage: "de",
-            formattingMode: .strict
+            formattingMode: .polish
         )
 
         let committed = config.setTranslationPreferences(updated, to: url)
         let loaded = AppConfig.load(from: url)
+        let storedSpeech = TranslationPreferencesContractTestSupport.storedSpeechObject(at: url)
+        let storedSpeechKeys = Set(storedSpeech.map { Array($0.keys) } ?? [])
 
         TranslationPreferencesContractTestSupport.expect(
             committed
@@ -210,12 +259,16 @@ final class TestTranslationPreferencesPersistence {
                 && loaded?.azureOpenAI.apiKey == "fictional-openai-key"
                 && loaded?.azureOpenAI.deploymentName == "fictional-deployment"
                 && loaded?.azureOpenAI.supportsVision == true
-                && config.speech.endpoint == "https://speech.invalid.example/cognitiveservices/v1"
+                && config.speech.endpoint == "https://fictional-eastus.api.cognitive.microsoft.com/"
                 && config.speech.apiKey == "fictional-speech-key"
-                && config.speech.voice == "en-GB-SoniaNeural"
-                && loaded?.speech.endpoint == "https://speech.invalid.example/cognitiveservices/v1"
+                && config.speech.voice == AzureSpeechConfig.automaticVoice
+                && loaded?.speech.endpoint == "https://fictional-eastus.api.cognitive.microsoft.com/"
                 && loaded?.speech.apiKey == "fictional-speech-key"
-                && loaded?.speech.voice == "en-GB-SoniaNeural"
+                && loaded?.speech.voice == AzureSpeechConfig.automaticVoice
+                && storedSpeechKeys == Set(["endpoint"])
+                && storedSpeech?["apiKey"] == nil
+                && storedSpeech?["voice"] == nil
+                && storedSpeech?["region"] == nil
                 && config.screenshotHotKey.keyCode == 14
                 && config.screenshotHotKey.modifiers == ScreenshotHotKey.default.modifiers
                 && loaded?.screenshotHotKey.keyCode == 14
@@ -224,7 +277,7 @@ final class TestTranslationPreferencesPersistence {
                 && config.textCommandHotKey.modifiers == 0
                 && loaded?.textCommandHotKey.keyCode == 50
                 && loaded?.textCommandHotKey.modifiers == 0,
-            "TestTranslationPreferencesPersistence.test_setTranslationPreferences_commitsOnlyPreferencesAndPersistsAtomically"
+            "TestTranslationPreferencesPersistence.test_setWorkbenchSelection_commitsOnlyPreferencesAndPersistsAtomically"
         )
     }
 
@@ -261,9 +314,8 @@ final class TestTranslationPreferencesPersistence {
             textCommandHotKey: TextCommandHotKey(keyCode: 50, modifiers: 0),
             translationPreferences: original,
             speech: AzureSpeechConfig(
-                endpoint: "https://speech.invalid.example/cognitiveservices/v1",
-                apiKey: "fictional-speech-key",
-                voice: AzureSpeechConfig.automaticVoice
+                endpoint: "https://fictional-eastus.api.cognitive.microsoft.com/",
+                apiKey: "fictional-speech-key"
             )
         )
         let attempted = TranslationPreferences(
@@ -279,7 +331,7 @@ final class TestTranslationPreferencesPersistence {
                 && config.translationPreferences == original
                 && config.translator.endpoint == "https://translator.invalid.example"
                 && config.azureOpenAI.deploymentName == "fictional-deployment"
-                && config.speech.endpoint == "https://speech.invalid.example/cognitiveservices/v1"
+                && config.speech.endpoint == "https://fictional-eastus.api.cognitive.microsoft.com/"
                 && config.screenshotHotKey.keyCode == 14
                 && config.textCommandHotKey.keyCode == 50
                 && !FileManager.default.fileExists(atPath: impossibleURL.path),
@@ -294,8 +346,9 @@ enum TranslationPreferencesContractTests {
         TestTranslationPreferencesDefaults.test_newConfig_defaultsToAutomaticTargetAndSmartFormatting()
         TestTranslationPreferencesDefaults.test_automaticAndFixedModes_routeTargetsWithoutChangingSavedFixedLanguage()
         TestTranslationPreferencesMigration.test_legacyConfigMissingNewFields_decodesDefaultsAndPreservesExistingServicesAndHotKeys()
-        TestTranslationPreferencesPersistence.test_saveThenLoad_roundTripsFixedTargetFormattingAndSpeechIndependently()
-        TestTranslationPreferencesPersistence.test_setTranslationPreferences_commitsOnlyPreferencesAndPersistsAtomically()
+        TestTranslationPreferencesMigration.test_legacySpeechRegionAndVoice_decodeAsTwoFieldsWithAutomaticVoice()
+        TestTranslationPreferencesPersistence.test_saveThenLoad_roundTripsWorkbenchTargetProcessingAndSpeechTwoFieldsIndependently()
+        TestTranslationPreferencesPersistence.test_setWorkbenchSelection_commitsOnlyPreferencesAndPersistsAtomically()
         TestTranslationPreferencesPersistence.test_setTranslationPreferences_whenPersistenceFails_rollsBackInMemoryPreferences()
 
         print(
