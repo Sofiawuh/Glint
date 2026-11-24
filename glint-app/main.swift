@@ -4,8 +4,8 @@ import Carbon.HIToolbox
 import os.log
 
 // ============================================================
-// Glint —— 划词翻译 / 划词提问 / 截图提问 菜单栏小程序
-// 选中文字 → 选区右下角显示微型入口 → 悬停展开「翻译」「提问」
+// Glint —— 文字翻译 / 文字提问 / 截图提问 菜单栏小程序
+// 选中文字 → 按文字命令快捷键 → 鼠标右下直接显示「翻译」「提问」
 //   翻译:自动识别源语言并翻译为「语言」设置中选定的目标语言
 //   提问:将划选内容作为上下文暂存内存,弹出输入框让用户输入 Prompt 一并发送(流式 + 多轮追问)
 //   截图提问:自定义全局快捷键(默认 ⌃⌥E)框选屏幕 → 将截图作为上下文暂存内存,输入 Prompt 后由多模态模型回答(可追问)
@@ -80,35 +80,39 @@ func primaryScreenHeight() -> CGFloat {
 // 全类型快照 + 完整恢复,避免污染用户剪贴板;轮询 changeCount 而非死等
 func selectedTextViaCopy(
     readIsCurrent: () -> Bool
-) -> ClipboardFallbackCapture {
+) -> TextCommandClipboardCapture {
     let pb = NSPasteboard.general
     let oldChange = pb.changeCount
 
     // 1. 全类型快照(尽量保留富文本/图片/文件等)
-    var snapshot: [NSPasteboardItem] = []
+    var snapshot: [TextCommandPasteboardItem] = []
     if let items = pb.pasteboardItems {
         for item in items {
-            let copy = NSPasteboardItem()
+            var dataByType: [String: Data] = [:]
             for type in item.types {
                 if let d = item.data(forType: type) {
-                    copy.setData(d, forType: type)
+                    dataByType[type.rawValue] = d
                 }
             }
-            snapshot.append(copy)
+            if !dataByType.isEmpty {
+                snapshot.append(TextCommandPasteboardItem(dataByType: dataByType))
+            }
         }
     }
     if snapshot.isEmpty {
-        let copy = NSPasteboardItem()
+        var dataByType: [String: Data] = [:]
         for type in pb.types ?? [] {
             if let data = pb.data(forType: type) {
-                copy.setData(data, forType: type)
+                dataByType[type.rawValue] = data
             }
         }
-        if !copy.types.isEmpty { snapshot.append(copy) }
+        if !dataByType.isEmpty {
+            snapshot.append(TextCommandPasteboardItem(dataByType: dataByType))
+        }
     }
 
     guard readIsCurrent() else {
-        return ClipboardFallbackCapture(
+        return TextCommandClipboardCapture(
             changeCountBefore: oldChange,
             changeCountAfter: oldChange,
             text: nil,
@@ -121,7 +125,7 @@ func selectedTextViaCopy(
     let keyC: CGKeyCode = 0x08
     let down = CGEvent(keyboardEventSource: src, virtualKey: keyC, keyDown: true); down?.flags = .maskCommand
     let up = CGEvent(keyboardEventSource: src, virtualKey: keyC, keyDown: false); up?.flags = .maskCommand
-    let sourceTag = SelectionEntryKeyboardClassifier.internalSyntheticCopySourceUserData
+    let sourceTag: Int64 = 0x474C4E545854 // GLNTXT
     down?.setIntegerValueField(.eventSourceUserData, value: sourceTag)
     up?.setIntegerValueField(.eventSourceUserData, value: sourceTag)
     down?.post(tap: .cghidEventTap)
@@ -131,7 +135,8 @@ func selectedTextViaCopy(
     var copied: String? = nil
     var copiedTypes: [String] = []
     var copiedChange = oldChange
-    var transaction = ClipboardRestorationPolicy.CopyTransaction(
+    var transaction = TextCommandClipboardTransaction(
+        originalItems: snapshot,
         changeCountBeforeCopy: oldChange
     )
     for _ in 0..<35 {
@@ -144,7 +149,7 @@ func selectedTextViaCopy(
         if !readIsCurrent() {
             transaction.invalidateReadToken()
         }
-        if transaction.observePasteboardChange(changeCount: currentChange) {
+        if transaction.observeCopy(changeCount: currentChange) {
             copiedChange = currentChange
             copied = pb.string(forType: .string)
             var typeSet: Set<String> = []
@@ -163,12 +168,19 @@ func selectedTextViaCopy(
 
     // 4. 仅当剪贴板仍处于本事务观察到的复制代次时恢复。
     // 若用户或剪贴板管理器已经写入更新代次，必须保留其新内容。
-    if transaction.shouldRestore(currentChangeCount: pb.changeCount) {
+    if let restoration = transaction.restorationItems(currentChangeCount: pb.changeCount) {
         pb.clearContents()
-        if !snapshot.isEmpty { pb.writeObjects(snapshot) }
+        let items = restoration.map { stored -> NSPasteboardItem in
+            let item = NSPasteboardItem()
+            for (rawType, data) in stored.dataByType {
+                item.setData(data, forType: NSPasteboard.PasteboardType(rawType))
+            }
+            return item
+        }
+        if !items.isEmpty { pb.writeObjects(items) }
     }
 
-    return ClipboardFallbackCapture(
+    return TextCommandClipboardCapture(
         changeCountBefore: oldChange,
         changeCountAfter: copiedChange,
         text: copied,
@@ -471,7 +483,7 @@ final class DraggablePaperView: NSView {
     }
 }
 
-// 划词快捷悬浮条内嵌分段按钮(无系统 Emoji,采用 1.5px 线性经纬地球 / 赤陶色四角星芒图标 + #EFECE6 独立悬停圆角块)
+// 文字快捷操作条内嵌分段按钮(无系统 Emoji,采用 1.5px 线性经纬地球 / 赤陶色四角星芒图标 + #EFECE6 独立悬停圆角块)
 final class ActionPillButton: NSButton {
     enum Kind {
         case translate
@@ -494,6 +506,8 @@ final class ActionPillButton: NSButton {
         focusRingType = .none
     }
     required init?(coder: NSCoder) { fatalError() }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -972,7 +986,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var assistantStart = 0                               // 当前 assistant 流式段在 transcript 的起点
     private var assistantAccum = ""
     private var turnStartLoc = 0                                 // 本轮(含提问/追问气泡)在 transcript 的起点,失败可整轮回滚
-    private var generation = 0                                   // 递增令牌:关闭/新划词时 +1,作废在途的非流式回调(翻译)
+    private var generation = 0                                   // 递增令牌:关闭/新文字请求时 +1,作废在途的非流式回调(翻译)
     private var uiTestMode = false                               // GLINT_UITEST:自测模式(程序化驱动 + 截图 + 长高日志)
     private let convoFont = NSFont.systemFont(ofSize: 14.5)
     private let convoW: CGFloat = 500
@@ -1065,7 +1079,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         paper.borderColor = isPill ? ClaudeTheme.pillBorder : ClaudeTheme.windowBorder
     }
 
-    // 划词后的快捷悬浮条(Segmented Pill:4px 内边距、无硬分割线、1.5px 线性图标、#EFECE6 独立悬停块)
+    // 文字命令提交后的快捷操作条(Segmented Pill:4px 内边距、无硬分割线、1.5px 线性图标、#EFECE6 独立悬停块)
     func showButton(text: String, fallbackPoint: NSPoint) {
         NSCursor.arrow.set()
         generation += 1
@@ -1418,7 +1432,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         activateAndFocusInput()
     }
 
-    // UI 自测入口(仅 GLINT_UITEST 时调用):验证划词「翻译 | 提问」胶囊与文本/截图两种紧凑提问卡片态
+    // UI 自测入口(仅 GLINT_UITEST 时调用):验证文字「翻译 | 提问」操作条与文本/截图两种紧凑提问卡片态
     func runDemoPromptContext() {
         uiTestMode = true
         let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
@@ -1676,7 +1690,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     // Claude UI 视觉回归自测(GLINT_UITEST=claude_ui):
-    // 1) 渲染图2 划词快捷悬浮条到 ~/glint_claude_pill.png
+    // 1) 渲染图2 文字快捷操作条到 ~/glint_claude_pill.png
     // 2) 渲染图1 解释会话大弹窗到 ~/glint_claude_explain.png
     func runDemoClaudeUI() {
         let p = NSScreen.main.map { NSPoint(x: $0.frame.midX - 180, y: $0.frame.midY + 260) } ?? NSEvent.mouseLocation
@@ -2260,7 +2274,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         scroll.reflectScrolledClipView(scroll.contentView)
     }
 
-    // 彻底结束会话:取消网络、停定时器、清状态(明确关闭 / 新划词 / 新会话时)
+    // 彻底结束会话:取消网络、停定时器、清状态(明确关闭 / 新文字请求 / 新会话时)
     private func stopConversation() {
         convoTask?.cancel(); convoTask = nil
         growTimer?.invalidate(); growTimer = nil
@@ -2439,244 +2453,22 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 }
 
-// MARK: - 全局鼠标事件 tap(CGEventTap)+ 自愈 + 授权后重建
+// MARK: - 全局外部点击 / Escape 事件 tap(CGEventTap) + 自愈
 
-var gDownLoc: CGPoint = .zero
 var gDownInsidePopup = false
-var gDownInsideSelectionEntry = false
 var gEventTap: CFMachPort?
 var gRunLoopSource: CFRunLoopSource?
 var gTapPollTimer: Timer?
 weak var gAppDelegate: AppDelegate?
 let gSelectionReader = AccessibilitySelectionReader()
-var gSelectionPressContext: SelectionPressContext?
-var gSelectionReadGate = SelectionReadGenerationGate()
-var gDownReadToken: SelectionReadGenerationToken?
-var gSelectionObservationTracker = SelectionObservationTracker()
-let gSelectionReadQueue = DispatchQueue(label: "com.yoryon.glint.selection-read", qos: .userInitiated)
+let gTextCommandReadQueue = DispatchQueue(
+    label: "com.yoryon.glint.text-command-read",
+    qos: .userInitiated
+)
+var gTextCommandReadGeneration: UInt64 = 0
 
-func applySelectionObservationDecision(
-    _ decision: SelectionObservationDecision,
-    allowPresentation: Bool
-) {
-    switch decision {
-    case .present(let snapshot):
-        guard allowPresentation,
-              gAppDelegate?.popup.shouldIgnoreNewSelection != true else { return }
-        gAppDelegate?.selectionEntry.show(snapshot: snapshot)
-    case .unchanged:
-        break
-    case .clear:
-        gAppDelegate?.selectionEntry.selectionInvalidated()
-    case .stale:
-        break
-    }
-}
-
-func scheduleSelectionBaselineObservation(delay: TimeInterval = 0.06) {
-    let readToken = gSelectionReadGate.beginRead()
-    let observationRequest = gSelectionObservationTracker.beginObservation(.baseline)
-    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + delay) {
-        let probe = gSelectionReader.currentSelectionProbe()
-        DispatchQueue.main.async {
-            guard gSelectionReadGate.accepts(readToken) else { return }
-            guard let probe else {
-                gSelectionObservationTracker.seed(with: nil)
-                gAppDelegate?.selectionEntry.selectionInvalidated()
-                return
-            }
-            let decision = gSelectionObservationTracker.completeObservation(
-                observationRequest,
-                probe: probe
-            )
-            applySelectionObservationDecision(decision, allowPresentation: false)
-        }
-    }
-}
-
-func handleMouseUp(
-    down: CGPoint,
-    up: CGPoint,
-    clickCount: Int,
-    press: SelectionPressContext?,
-    readToken: SelectionReadGenerationToken?
-) {
-    let dist = hypot(up.x - down.x, up.y - down.y)
-    logLine("tap mouseUp dist=\(String(format: "%.1f", dist)) clicks=\(clickCount)")
-    guard let readToken else { return }
-    let observationRequest = gSelectionObservationTracker.beginObservation(
-        .mouseRelease(
-            clickCount: clickCount,
-            displacement: CGPoint(x: up.x - down.x, y: up.y - down.y)
-        )
-    )
-    // 取词放后台线程,避免 usleep 阻塞主 runloop 导致 tap 超时被禁用
-    // 串行队列只负责保护可能使用剪贴板的降级路径；新手势通过代际令牌淘汰旧结果，不会被直接丢弃。
-    gSelectionReadQueue.async {
-        usleep(50_000)
-        guard DispatchQueue.main.sync(execute: {
-            gSelectionReadGate.accepts(readToken)
-        }) else {
-            logLine("  skip: stale selection read before AX")
-            return
-        }
-        let evaluation = gSelectionReader.evaluateRelease(
-            from: press,
-            at: up,
-            previousProbe: observationRequest.baselineProbe
-        )
-        let clipboardSnapshot: SelectionSnapshot?
-        let allowPresentation: Bool
-        let path: String
-        switch evaluation.outcome {
-        case .accepted:
-            clipboardSnapshot = nil
-            allowPresentation = true
-            path = "ax"
-        case .clipboardFallbackEligible:
-            let fallbackAllowed = SelectionDetection.shouldAttemptClipboardFallback(
-                outcome: evaluation.outcome,
-                clickCount: clickCount,
-                displacement: CGPoint(x: up.x - down.x, y: up.y - down.y),
-                pressedRolePath: press?.pressedRolePath ?? evaluation.releasedRolePath,
-                releasedRolePath: evaluation.releasedRolePath
-            )
-            guard fallbackAllowed else {
-                clipboardSnapshot = nil
-                allowPresentation = false
-                path = "ignored"
-                break
-            }
-            guard DispatchQueue.main.sync(execute: {
-                gSelectionReadGate.accepts(readToken)
-            }) else {
-                logLine("  skip: stale selection read before copy")
-                return
-            }
-            let capture = selectedTextViaCopy(readIsCurrent: {
-                DispatchQueue.main.sync {
-                    gSelectionReadGate.accepts(readToken)
-                }
-            })
-            let clipboardOnlySnapshot = SelectionDetection.clipboardOnlySnapshot(
-                capture: capture,
-                sourceApplication: evaluation.selectionEvidence.sourceApplication,
-                focusedElementIdentity: evaluation.selectionEvidence.focusedElementIdentity,
-                releasePointInQuartz: up
-            )
-            if let clipboardOnlySnapshot,
-               evaluation.clipboardEvidenceChanged {
-                clipboardSnapshot = SelectionDetection.clipboardSnapshot(
-                    text: clipboardOnlySnapshot.text,
-                    selectionEvidence: evaluation.selectionEvidence,
-                    evidenceChanged: true
-                ) ?? clipboardOnlySnapshot
-            } else {
-                clipboardSnapshot = clipboardOnlySnapshot
-            }
-            allowPresentation = clipboardSnapshot != nil
-            path = clipboardSnapshot == nil ? "copy-failed" : "copy"
-        case .ignored:
-            clipboardSnapshot = nil
-            allowPresentation = false
-            path = "ignored"
-        }
-        let role = evaluation.releasedRolePath.first ?? "unknown"
-        logLine("  selection path=\(path) role=\(role) range=\(evaluation.hasRange) bounds=\(evaluation.hasBounds)")
-        DispatchQueue.main.async {
-            guard gSelectionReadGate.accepts(readToken) else {
-                logLine("  skip: stale selection read")
-                return
-            }
-            let decision: SelectionObservationDecision
-            if let clipboardSnapshot {
-                decision = gSelectionObservationTracker.completeObservation(
-                    observationRequest,
-                    snapshot: clipboardSnapshot
-                )
-            } else {
-                decision = gSelectionObservationTracker.completeObservation(
-                    observationRequest,
-                    probe: evaluation.selectionEvidence
-                )
-            }
-            applySelectionObservationDecision(
-                decision,
-                allowPresentation: allowPresentation
-            )
-        }
-    }
-}
-
-func handleUserKeyDown(
-    keyCode: Int64,
-    shiftPressed: Bool,
-    commandPressed: Bool
-) {
-    gDownReadToken = nil
-    if keyCode == 53 {
-        gSelectionReadGate.invalidate()
-        gSelectionObservationTracker.invalidatePendingObservations()
-        gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(for: .escape)
-        gAppDelegate?.selectionEntry.escapePressed()
-        return
-    }
-
-    gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(for: .ordinaryKey)
-    gAppDelegate?.selectionEntry.invalidateClipboardOnlySelection()
-
-    let readToken = gSelectionReadGate.beginRead()
-    if let trigger = SelectionEntryKeyboardClassifier.selectionTrigger(
-        keyCode: keyCode,
-        shiftPressed: shiftPressed,
-        commandPressed: commandPressed
-    ) {
-        let observationRequest = gSelectionObservationTracker.beginObservation(
-            .keyboardSelection(trigger)
-        )
-        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.08) {
-            let probe = gSelectionReader.currentSelectionProbe()
-            DispatchQueue.main.async {
-                guard gSelectionReadGate.accepts(readToken) else { return }
-                guard let probe else {
-                    gSelectionObservationTracker.seed(with: nil)
-                    gAppDelegate?.selectionEntry.selectionInvalidated()
-                    return
-                }
-                let decision = gSelectionObservationTracker.completeObservation(
-                    observationRequest,
-                    probe: probe
-                )
-                applySelectionObservationDecision(decision, allowPresentation: true)
-            }
-        }
-        return
-    }
-
-    let entryRequest = gAppDelegate?.selectionEntry.beginKeyboardRevalidation()
-    let observationRequest = gSelectionObservationTracker.beginObservation(.revalidation)
-    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.08) {
-        let probe = gSelectionReader.currentSelectionProbe()
-        DispatchQueue.main.async {
-            guard gSelectionReadGate.accepts(readToken) else { return }
-            if let probe {
-                let decision = gSelectionObservationTracker.completeObservation(
-                    observationRequest,
-                    probe: probe
-                )
-                applySelectionObservationDecision(decision, allowPresentation: false)
-            } else {
-                gSelectionObservationTracker.seed(with: nil)
-                gAppDelegate?.selectionEntry.selectionInvalidated()
-            }
-            if let entryRequest {
-                gAppDelegate?.selectionEntry.completeKeyboardRevalidation(
-                    entryRequest,
-                    currentProbe: probe
-                )
-            }
-        }
-    }
+func invalidateTextCommandRead() {
+    gTextCommandReadGeneration &+= 1
 }
 
 let gEventCallback: CGEventTapCallBack = { _, type, event, _ in
@@ -2689,86 +2481,30 @@ let gEventCallback: CGEventTapCallBack = { _, type, event, _ in
 
     let loc = event.location
     if type == .leftMouseDown {
-        gDownLoc = loc
         DispatchQueue.main.async {
-            gDownReadToken = gSelectionReadGate.beginRead()
-            gSelectionObservationTracker.invalidatePendingObservations()
             gDownInsidePopup = false
-            gDownInsideSelectionEntry = false
             let point = appKitPoint(fromQuartz: loc, primaryScreenHeight: primaryScreenHeight())
-            if let ad = gAppDelegate, ad.selectionEntry.handleMouseDown(at: point) {
-                gDownInsideSelectionEntry = true
-                gSelectionPressContext = nil
+            if let ad = gAppDelegate, ad.textCommandPanel.handleMouseDown(at: point) {
                 return
             }
+            invalidateTextCommandRead()
             if let ad = gAppDelegate, ad.popup.isVisible, let f = ad.popup.frame() {
                 if f.insetBy(dx: -6, dy: -6).contains(point) {
-                    gDownInsidePopup = true        // 点在浮窗内:让用户选字/点按钮,不关、不当作新划词
+                    gDownInsidePopup = true        // 点在浮窗内:让用户选字/点按钮,不关、不当作新文字请求
                 } else if ad.popup.isComposingText {
-                    gDownInsidePopup = true        // 输入法候选窗在浮窗外:点候选词不关、不当作新划词
+                    gDownInsidePopup = true        // 输入法候选窗在浮窗外:点候选词不关、不当作新文字请求
                 } else {
                     ad.popup.handleOutsideClick()  // 内容窗隐藏并可恢复;快捷胶囊仍直接关闭;钉住窗保持显示
                 }
             }
-            if gDownInsidePopup {
-                gSelectionPressContext = nil
-                return
-            }
-            gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(for: .mouseDown)
-            gSelectionPressContext = gSelectionReader.capturePress(at: loc)
-        }
-    } else if type == .leftMouseUp {
-        let down = gDownLoc
-        let clickCount = Int(event.getIntegerValueField(.mouseEventClickState))
-        DispatchQueue.main.async {
-            if gDownInsideSelectionEntry {
-                gDownInsideSelectionEntry = false
-                gDownReadToken = nil
-                return
-            }
-            if gDownInsidePopup {
-                gDownInsidePopup = false
-                gDownReadToken = nil
-                return
-            }  // 在浮窗里的拖选,不触发新气泡
-            let press = gSelectionPressContext
-            let readToken = gDownReadToken
-            gSelectionPressContext = nil
-            gDownReadToken = nil
-            handleMouseUp(
-                down: down,
-                up: loc,
-                clickCount: clickCount,
-                press: press,
-                readToken: readToken
-            )
-        }
-    } else if type == .mouseMoved {
-        DispatchQueue.main.async {
-            let point = appKitPoint(fromQuartz: loc, primaryScreenHeight: primaryScreenHeight())
-            gAppDelegate?.selectionEntry.pointerMoved(to: point)
         }
     } else if type == .keyDown {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let sourceUserData = event.getIntegerValueField(.eventSourceUserData)
-        let decision = SelectionEntryKeyboardClassifier.classify(
-            SelectionEntryKeyboardInput(
-                keyCode: keyCode,
-                sourceUserData: sourceUserData
-            )
-        )
-        if decision == .ignoreInternalSyntheticCopy {
-            return Unmanaged.passUnretained(event)
-        }
-        let flags = event.flags
-        let shiftPressed = flags.contains(.maskShift)
-        let commandPressed = flags.contains(.maskCommand)
-        DispatchQueue.main.async {
-            handleUserKeyDown(
-                keyCode: keyCode,
-                shiftPressed: shiftPressed,
-                commandPressed: commandPressed
-            )
+        if keyCode == 53 {
+            DispatchQueue.main.async {
+                invalidateTextCommandRead()
+                gAppDelegate?.textCommandPanel.escapePressed()
+            }
         }
     }
     return Unmanaged.passUnretained(event)
@@ -2783,8 +2519,6 @@ func setupEventTap() -> Bool {
         return ok
     }
     let mask = (UInt64(1) << CGEventType.leftMouseDown.rawValue)
-        | (UInt64(1) << CGEventType.leftMouseUp.rawValue)
-        | (UInt64(1) << CGEventType.mouseMoved.rawValue)
         | (UInt64(1) << CGEventType.keyDown.rawValue)
     guard let tap = CGEvent.tapCreate(
         tap: .cgSessionEventTap,
@@ -2831,29 +2565,46 @@ extension NSMenuItem {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let popup = PopupController()
     let settings = SettingsController()
-    lazy var selectionEntry = SelectionEntryController(
-        onTranslate: { [weak self] snapshot, anchor in
-            self?.popup.beginSelectionTranslation(text: snapshot.text, anchorTopLeft: anchor)
+    lazy var textCommandPanel = TextCommandPanelController(
+        onTranslate: { [weak self] text, anchor in
+            self?.popup.beginSelectionTranslation(text: text, anchorTopLeft: anchor)
         },
-        onAsk: { [weak self] snapshot, anchor in
-            self?.popup.beginSelectionQuestion(text: snapshot.text, anchorTopLeft: anchor)
+        onAsk: { [weak self] text, anchor in
+            self?.popup.beginSelectionQuestion(text: text, anchorTopLeft: anchor)
         }
     )
     var statusItem: NSStatusItem?
-    private var hotKeyManager: ScreenshotHotKeyManager?
+    private var hotKeyRegistrar: CarbonHotKeyRegistrar?
+    private var screenshotHotKeyManager: ScreenshotHotKeyManager?
+    private var textCommandHotKeyManager: TextCommandHotKeyManager?
     var activeCapture: RegionCapture?      // 截图期间强持有 RegionCapture,避免遮罩提前释放
 
     var currentScreenshotHotKey: ScreenshotHotKey {
-        hotKeyManager?.effectiveHotKey ?? AppConfig.shared.screenshotHotKey
+        screenshotHotKeyManager?.effectiveHotKey ?? AppConfig.shared.screenshotHotKey
+    }
+
+    var currentTextCommandHotKey: TextCommandHotKey {
+        textCommandHotKeyManager?.effectiveHotKey ?? AppConfig.shared.textCommandHotKey
     }
 
     var screenshotHotKeyStartupMessage: String? {
-        guard let manager = hotKeyManager else { return nil }
+        guard let manager = screenshotHotKeyManager else { return nil }
         if !manager.hasActiveRegistration {
             return "截图快捷键注册失败，请录制其他组合键"
         }
         if manager.didFallbackToDefault {
             return "原快捷键不可用，已恢复默认 ⌃⌥E"
+        }
+        return nil
+    }
+
+    var textCommandHotKeyStartupMessage: String? {
+        guard let manager = textCommandHotKeyManager else { return nil }
+        if !manager.hasActiveRegistration {
+            return "文字命令快捷键注册失败，请录制其他组合键"
+        }
+        if manager.didFallbackToDefault {
+            return "原快捷键不可用，已恢复默认 ⌃⌥T"
         }
         return nil
     }
@@ -2875,12 +2626,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMainMenu()
 
         // UI 截图自测(不建事件 tap / 不请求权限),便于截屏验证真实渲染:
-        //   GLINT_UITEST=prompt_context → 划词提问 + 截图提问卡片自检(本地、不走网络)
+        //   GLINT_UITEST=prompt_context → 文字提问 + 截图提问卡片自检(本地、不走网络)
         //   GLINT_UITEST=translate      → 翻译流程(本地、不走网络)
         //   GLINT_UITEST=settings       → 设置窗口三 Tab 自检
         //   GLINT_UITEST=hotkey_settings → 快捷键录制控件状态与布局自检
         //   GLINT_UITEST=pin_restore    → 图钉、隐藏与恢复自检
-        //   GLINT_UITEST=selection_entry → 选区微型入口与悬停展开自检
+        //   GLINT_UITEST=text_command_panel → 文字命令面板自检
         //   其它值 → 提问会话流程(走真实 API)
         if let mode = ProcessInfo.processInfo.environment["GLINT_UITEST"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -2893,10 +2644,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.popup.runDemoClaudeUI()
                 } else if mode == "pin_restore" {
                     self.popup.runDemoPinRestore()
-                } else if mode == "selection_entry" {
+                } else if mode == "text_command_panel" {
                     let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"]
-                        ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("glint-selection-entry")
-                    self.selectionEntry.runSmokeTest(outputDirectory: outDir) { ok in
+                        ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("glint-text-command-panel")
+                    self.textCommandPanel.runSmokeTest(outputDirectory: outDir) { ok in
                         if !ok { exit(1) }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                             NSApp.terminate(nil)
@@ -2958,21 +2709,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupStatusItem()
 
-        // 可配置全局截图热键(默认 ⌃⌥E),与划词监听互不依赖。
-        hotKeyManager = ScreenshotHotKeyManager(
+        // 两套可独立录制的全局快捷键共享同一个 Carbon 事件处理器。
+        let registrar = CarbonHotKeyRegistrar(logger: logLine)
+        hotKeyRegistrar = registrar
+        screenshotHotKeyManager = ScreenshotHotKeyManager(
             savedHotKey: AppConfig.shared.screenshotHotKey,
-            registrar: CarbonHotKeyRegistrar(logger: logLine),
+            registrar: registrar,
             persist: { AppConfig.shared.setScreenshotHotKey($0) },
+            reservedHotKeyProvider: { [weak self] in
+                self?.textCommandHotKeyManager?.effectiveHotKey.screenshotHotKey
+            },
             onScreenshot: { [weak self] in
                 DispatchQueue.main.async { self?.onScreenshotExplain() }
             }
         )
-        if let manager = hotKeyManager {
-            logLine("HOTKEY startup effective=\(manager.effectiveHotKey.displayString) active=\(manager.hasActiveRegistration) error=\(String(describing: manager.startupRegistrationError))")
+        textCommandHotKeyManager = TextCommandHotKeyManager(
+            savedHotKey: AppConfig.shared.textCommandHotKey,
+            screenshotHotKeyProvider: { [weak self] in
+                self?.currentScreenshotHotKey ?? AppConfig.shared.screenshotHotKey
+            },
+            registrar: TextCommandHotKeyRegistrarAdapter(base: registrar),
+            persist: { AppConfig.shared.setTextCommandHotKey($0) },
+            onTextCommand: { [weak self] in
+                DispatchQueue.main.async { self?.requestTextCommand() }
+            }
+        )
+        if let manager = screenshotHotKeyManager {
+            logLine("HOTKEY screenshot startup effective=\(manager.effectiveHotKey.displayString) active=\(manager.hasActiveRegistration) error=\(String(describing: manager.startupRegistrationError))")
+        }
+        if let manager = textCommandHotKeyManager {
+            logLine("HOTKEY text-command startup effective=\(manager.effectiveHotKey.displayString) active=\(manager.hasActiveRegistration) error=\(String(describing: manager.startupRegistrationError))")
         }
 
         if AXIsProcessTrusted() {
-            scheduleSelectionBaselineObservation()
             setupEventTap()
         } else {
             requestAccessibility()          // 弹一次系统授权提示
@@ -2981,31 +2750,143 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func beginScreenshotHotKeyRecording(_ handler: @escaping (ScreenshotHotKey) -> Void) {
-        hotKeyManager?.beginRecording(handler)
+        screenshotHotKeyManager?.beginRecording(handler)
+        textCommandHotKeyManager?.beginRecording { handler($0.screenshotHotKey) }
     }
 
     @objc private func frontmostApplicationDidChange(_ notification: Notification) {
-        selectionEntry.revalidateSource(gSelectionReader.currentSourceIdentity())
-        gSelectionObservationTracker.invalidateClipboardOnlyDeduplication(
-            for: .sourceApplicationChanged
-        )
-        // 用户可能正用鼠标按下同时激活后台应用；此时不得使这次真实选区手势的读取令牌失效。
-        guard gDownReadToken == nil else { return }
-        gSelectionReadGate.invalidate()
-        gSelectionObservationTracker.invalidatePendingObservations()
-        scheduleSelectionBaselineObservation()
+        invalidateTextCommandRead()
+        textCommandPanel.hide()
     }
 
     func endScreenshotHotKeyRecording() {
-        hotKeyManager?.endRecording()
+        screenshotHotKeyManager?.endRecording()
+        textCommandHotKeyManager?.endRecording()
+    }
+
+    func beginTextCommandHotKeyRecording(
+        _ handler: @escaping (TextCommandHotKey) -> Void
+    ) {
+        textCommandHotKeyManager?.beginRecording(handler)
+        screenshotHotKeyManager?.beginRecording {
+            handler(TextCommandHotKey(
+                keyCode: $0.keyCode,
+                modifiers: $0.modifiers
+            ))
+        }
+    }
+
+    func endTextCommandHotKeyRecording() {
+        textCommandHotKeyManager?.endRecording()
+        screenshotHotKeyManager?.endRecording()
     }
 
     func applyScreenshotHotKey(_ hotKey: ScreenshotHotKey) -> ScreenshotHotKeyApplyResult {
-        guard let manager = hotKeyManager else { return .registrationFailed }
+        guard let manager = screenshotHotKeyManager else { return .registrationFailed }
         let result = manager.apply(hotKey)
         logLine("HOTKEY apply candidate=\(hotKey.displayString) result=\(result) effective=\(manager.effectiveHotKey.displayString)")
         refreshMenu()
         return result
+    }
+
+    func applyTextCommandHotKey(
+        _ hotKey: TextCommandHotKey
+    ) -> TextCommandHotKeyApplyResult {
+        guard let manager = textCommandHotKeyManager else { return .registrationFailed }
+        let result = manager.apply(hotKey)
+        logLine("HOTKEY text-command apply candidate=\(hotKey.displayString) result=\(result) effective=\(manager.effectiveHotKey.displayString)")
+        refreshMenu()
+        return result
+    }
+
+    func requestTextCommand() {
+        let mouseLocation = NSEvent.mouseLocation
+        let request = textCommandPanel.beginRequest()
+        gTextCommandReadGeneration &+= 1
+        let generation = gTextCommandReadGeneration
+
+        guard let sourceApplicationPID = NSWorkspace.shared
+            .frontmostApplication?
+            .processIdentifier else {
+            _ = textCommandPanel.showNoTextHint(
+                request: request,
+                mouseLocation: mouseLocation
+            )
+            return
+        }
+        let readIdentity = TextCommandReadIdentity(
+            generation: generation,
+            sourceApplicationPID: sourceApplicationPID
+        )
+
+        func readIsCurrent(at checkpoint: TextCommandReadCheckpoint) -> Bool {
+            DispatchQueue.main.sync {
+                TextCommandReadSourcePolicy.allows(
+                    readIdentity,
+                    currentGeneration: gTextCommandReadGeneration,
+                    frontmostApplicationPID: NSWorkspace.shared
+                        .frontmostApplication?
+                        .processIdentifier,
+                    at: checkpoint
+                )
+            }
+        }
+
+        gTextCommandReadQueue.async { [weak self] in
+            guard self != nil,
+                  readIsCurrent(at: .beforeAccessibilityRead) else {
+                logLine("TEXT_COMMAND skip stale source before AX read")
+                return
+            }
+            let axText = gSelectionReader.currentSelectedText()
+            guard readIsCurrent(at: .afterAccessibilityRead) else {
+                logLine("TEXT_COMMAND skip stale source after AX read")
+                return
+            }
+            let selected: TextCommandSelectedText?
+            switch SelectedTextExtractor.begin(axSelectedText: axText) {
+            case .selected(let value):
+                selected = value
+            case .copyRequired:
+                guard readIsCurrent(at: .beforeProtectedCopy) else {
+                    logLine("TEXT_COMMAND skip stale source before protected copy")
+                    return
+                }
+                let capture = selectedTextViaCopy(readIsCurrent: {
+                    readIsCurrent(at: .duringProtectedCopy)
+                })
+                selected = SelectedTextExtractor.completeClipboard(capture)
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      TextCommandReadSourcePolicy.allows(
+                        readIdentity,
+                        currentGeneration: gTextCommandReadGeneration,
+                        frontmostApplicationPID: NSWorkspace.shared
+                            .frontmostApplication?
+                            .processIdentifier,
+                        at: .beforePresentation
+                      ) else {
+                    logLine("TEXT_COMMAND skip stale source before presentation")
+                    return
+                }
+                if let selected {
+                    logLine("TEXT_COMMAND selected source=\(selected.source)")
+                    _ = self.textCommandPanel.showActions(
+                        text: selected.text,
+                        request: request,
+                        mouseLocation: mouseLocation
+                    )
+                } else {
+                    logLine("TEXT_COMMAND no text")
+                    _ = self.textCommandPanel.showNoTextHint(
+                        request: request,
+                        mouseLocation: mouseLocation
+                    )
+                }
+            }
+        }
     }
 
     func startWaitingForAccessibility() {
@@ -3016,7 +2897,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let ok = setupEventTap()
                 logLine("accessibility granted, tap setup ok=\(ok)")
                 if ok {
-                    scheduleSelectionBaselineObservation()
                     t.invalidate()
                     gTapPollTimer = nil
                 }

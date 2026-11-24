@@ -807,11 +807,13 @@ final class AppConfig: Codable {
     var translator: AzureTranslatorConfig
     var azureOpenAI: AzureOpenAIConfig
     var screenshotHotKey: ScreenshotHotKey
+    var textCommandHotKey: TextCommandHotKey
 
     private enum CodingKeys: String, CodingKey {
         case translator
         case azureOpenAI
         case screenshotHotKey
+        case textCommandHotKey
     }
 
     private static var defaultURL: URL {
@@ -821,11 +823,13 @@ final class AppConfig: Codable {
     init(
         translator: AzureTranslatorConfig = AzureTranslatorConfig(),
         azureOpenAI: AzureOpenAIConfig = AzureOpenAIConfig(),
-        screenshotHotKey: ScreenshotHotKey = .default
+        screenshotHotKey: ScreenshotHotKey = .default,
+        textCommandHotKey: TextCommandHotKey = .default
     ) {
         self.translator = translator
         self.azureOpenAI = azureOpenAI
         self.screenshotHotKey = screenshotHotKey
+        self.textCommandHotKey = textCommandHotKey
     }
 
     init(from decoder: Decoder) throws {
@@ -833,6 +837,7 @@ final class AppConfig: Codable {
         translator = try container.decode(AzureTranslatorConfig.self, forKey: .translator)
         azureOpenAI = try container.decode(AzureOpenAIConfig.self, forKey: .azureOpenAI)
         screenshotHotKey = try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .screenshotHotKey) ?? .default
+        textCommandHotKey = try container.decodeIfPresent(TextCommandHotKey.self, forKey: .textCommandHotKey) ?? .default
     }
 
     func encode(to encoder: Encoder) throws {
@@ -840,6 +845,7 @@ final class AppConfig: Codable {
         try container.encode(translator, forKey: .translator)
         try container.encode(azureOpenAI, forKey: .azureOpenAI)
         try container.encode(screenshotHotKey, forKey: .screenshotHotKey)
+        try container.encode(textCommandHotKey, forKey: .textCommandHotKey)
     }
 
     func load() {
@@ -847,6 +853,7 @@ final class AppConfig: Codable {
         translator = loaded.translator
         azureOpenAI = loaded.azureOpenAI
         screenshotHotKey = loaded.screenshotHotKey
+        textCommandHotKey = loaded.textCommandHotKey
     }
 
     @discardableResult
@@ -912,6 +919,15 @@ final class AppConfig: Codable {
         screenshotHotKey = newHotKey
         if save() { return true }
         screenshotHotKey = oldHotKey
+        return false
+    }
+
+    @discardableResult
+    func setTextCommandHotKey(_ newHotKey: TextCommandHotKey) -> Bool {
+        let oldHotKey = textCommandHotKey
+        textCommandHotKey = newHotKey
+        if save() { return true }
+        textCommandHotKey = oldHotKey
         return false
     }
 }

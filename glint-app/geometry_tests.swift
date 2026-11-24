@@ -1,14 +1,15 @@
 import AppKit
 
-// Geometry.swift 的单测(不进 App 打包;跑法:
-//   swiftc -o /tmp/glint_geo_test Geometry.swift geometry_tests.swift -framework AppKit && /tmp/glint_geo_test)
+// Geometry.swift 的纯几何契约测试（不创建窗口或读取真实屏幕）。
+// 运行：
+//   swiftc -o /tmp/glint_geometry_test Geometry.swift geometry_tests.swift \
+//     -framework AppKit && /tmp/glint_geometry_test
 
-@main
-struct GeoTests {
+enum GeometryTestSupport {
     static var failures = 0
 
-    static func expect(_ cond: Bool, _ name: String) {
-        if cond {
+    static func expect(_ condition: @autoclosure () -> Bool, _ name: String) {
+        if condition() {
             print("  ok  \(name)")
         } else {
             failures += 1
@@ -16,308 +17,267 @@ struct GeoTests {
         }
     }
 
-    static func approx(_ a: CGFloat, _ b: CGFloat, eps: CGFloat = 0.5) -> Bool {
-        abs(a - b) < eps
+    static func approximatelyEqual(_ lhs: CGFloat, _ rhs: CGFloat) -> Bool {
+        abs(lhs - rhs) < 0.5
     }
 
-    static func insideSafeArea(_ r: NSRect, visible vf: CGRect, gap: CGFloat = 6) -> Bool {
-        let safe = vf.insetBy(dx: gap, dy: gap)
-        return r.minX >= safe.minX - 0.5
-            && r.maxX <= safe.maxX + 0.5
-            && r.minY >= safe.minY - 0.5
-            && r.maxY <= safe.maxY + 0.5
+    static func rectEquals(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        approximatelyEqual(lhs.minX, rhs.minX)
+            && approximatelyEqual(lhs.minY, rhs.minY)
+            && approximatelyEqual(lhs.width, rhs.width)
+            && approximatelyEqual(lhs.height, rhs.height)
     }
 
-    static func insideVisibleFrame(_ r: NSRect, visible vf: CGRect) -> Bool {
-        r.minX >= vf.minX - 0.5
-            && r.maxX <= vf.maxX + 0.5
-            && r.minY >= vf.minY - 0.5
-            && r.maxY <= vf.maxY + 0.5
+    static func isInsideSafeArea(_ rect: CGRect, visibleFrame: CGRect) -> Bool {
+        let safeArea = visibleFrame.insetBy(dx: kScreenEdgeGap, dy: kScreenEdgeGap)
+        return rect.minX >= safeArea.minX - 0.5
+            && rect.maxX <= safeArea.maxX + 0.5
+            && rect.minY >= safeArea.minY - 0.5
+            && rect.maxY <= safeArea.maxY + 0.5
+    }
+}
+
+final class TestClampRectToVisible {
+    static func test_in_bounds_rect_preserves_origin_and_size() {
+        let visible = CGRect(x: 100, y: 50, width: 1000, height: 700)
+        let input = CGRect(x: 300, y: 250, width: 200, height: 120)
+
+        let result = clampRectToVisible(input, visible: visible)
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.rectEquals(result, input),
+            "TestClampRectToVisible.test_in_bounds_rect_preserves_origin_and_size"
+        )
     }
 
-    static func main() {
-        let vf = NSRect(x: 0, y: 0, width: 1800, height: 1100)
-        let bubbleW: CGFloat = 152
-        let bubbleH: CGFloat = 34
-
-        // —— 1. 常量契约 ——
-        expect(approx(kScreenEdgeGap, 6) && approx(kCursorOffsetX, 8) && approx(kCursorOffsetY, 8),
-               "常量契约: kScreenEdgeGap=6, kCursorOffsetX=8, kCursorOffsetY=8")
-
-        // —— 2. 常规位置(主屏内部): 浮窗左上角精确落在光标右下角 (pt.x + 8, pt.y - 8) ——
-        let ptNormal = NSPoint(x: 900, y: 500)
-        let rNormal = rectAtCursorBottomRight(ptNormal, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rNormal.minX, 908)
-                && approx(rNormal.maxY, 492)
-                && approx(rNormal.origin.y, 492 - bubbleH)
-                && approx(rNormal.width, bubbleW)
-                && approx(rNormal.height, bubbleH)
-                && rNormal.minX > ptNormal.x
-                && rNormal.maxY < ptNormal.y,
-               "常规位置: 左上角精确锚定在光标右下角 (pt.x+8, pt.y-8)")
-
-        let rCompat = rectNearPoint(ptNormal, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rCompat.minX, rNormal.minX)
-                && approx(rCompat.minY, rNormal.minY)
-                && approx(rCompat.width, rNormal.width)
-                && approx(rCompat.height, rNormal.height),
-               "兼容入口 rectNearPoint 与 rectAtCursorBottomRight 行为一致")
-
-        // —— 3. 多行长段划词 / 反向划词释放点 ——
-        let ptMultiLineEnd = NSPoint(x: 745, y: 435)
-        let rMultiLine = rectAtCursorBottomRight(ptMultiLineEnd, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rMultiLine.minX, 753) && approx(rMultiLine.maxY, 427) && insideSafeArea(rMultiLine, visible: vf),
-               "多行长段划词释放点 (745, 435) → 精确锚定在 (753, 427)")
-
-        let ptReverseEnd = NSPoint(x: 510, y: 627)
-        let rReverse = rectAtCursorBottomRight(ptReverseEnd, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rReverse.minX, 518) && approx(rReverse.maxY, 619) && insideSafeArea(rReverse, visible: vf),
-               "反向拖选释放点 (510, 627) → 精确锚定在 (518, 619)")
-
-        // —— 4. 屏幕右边界夹紧 ——
-        let ptNearRight = NSPoint(x: 1720, y: 500)
-        let rRight = rectAtCursorBottomRight(ptNearRight, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rRight.maxX, vf.maxX - 6)
-                && approx(rRight.minX, vf.maxX - 6 - bubbleW)
-                && approx(rRight.maxY, 492)
-                && insideSafeArea(rRight, visible: vf),
-               "屏幕右边界夹紧: maxX 夹紧至 vf.maxX-6, maxY 保持 pt.y-8")
-
-        // —— 5. 屏幕下边界夹紧(含 Dock 栏上方 vf.minY > 0) ——
-        let vfWithDock = NSRect(x: 0, y: 70, width: 1800, height: 1005)
-        let ptNearDock = NSPoint(x: 600, y: 95)
-        let rBottom = rectAtCursorBottomRight(ptNearDock, visible: vfWithDock, w: bubbleW, h: bubbleH)
-        expect(approx(rBottom.minY, vfWithDock.minY + 6)
-                && approx(rBottom.minX, 608)
-                && insideSafeArea(rBottom, visible: vfWithDock),
-               "屏幕下边界夹紧(Dock 上方): minY 夹紧至 vf.minY+6, minX 保持 pt.x+8")
-
-        // —— 6. 屏幕右下角极限位置 ——
-        let ptBottomRight = NSPoint(x: 1795, y: 5)
-        let rCornerBR = rectAtCursorBottomRight(ptBottomRight, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rCornerBR.maxX, vf.maxX - 6)
-                && approx(rCornerBR.minY, vf.minY + 6)
-                && insideSafeArea(rCornerBR, visible: vf),
-               "屏幕右下角极限位置: 同时触发右/下边界夹紧, 完整落在可视区内")
-
-        // —— 7. 屏幕左边界与上边界极限位置 ——
-        let ptLeftEdge = NSPoint(x: -5, y: 500)
-        let rLeft = rectAtCursorBottomRight(ptLeftEdge, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rLeft.minX, vf.minX + 6)
-                && approx(rLeft.maxY, 492)
-                && insideSafeArea(rLeft, visible: vf),
-               "屏幕左边界极限位置: minX 夹紧至 vf.minX+6")
-
-        let ptTopEdge = NSPoint(x: 900, y: 1105)
-        let rTop = rectAtCursorBottomRight(ptTopEdge, visible: vf, w: bubbleW, h: bubbleH)
-        expect(approx(rTop.minX, 908)
-                && approx(rTop.maxY, vf.maxY - 6)
-                && insideSafeArea(rTop, visible: vf),
-               "屏幕上边界极限位置: maxY 夹紧至 vf.maxY-6")
-
-        // —— 8. 多显示器负坐标屏幕(左侧外接屏) ——
-        let vfLeftMonitor = CGRect(x: -2560, y: -116, width: 2560, height: 1440)
-        let ptLeftMonCenter = NSPoint(x: -1200, y: 400)
-        let rLeftMonCenter = rectAtCursorBottomRight(ptLeftMonCenter, visible: vfLeftMonitor, w: bubbleW, h: bubbleH)
-        expect(approx(rLeftMonCenter.minX, -1192)
-                && approx(rLeftMonCenter.maxY, 392)
-                && insideSafeArea(rLeftMonCenter, visible: vfLeftMonitor),
-               "左侧负坐标外接屏内部: 精确落在 (-1192, 392)")
-
-        let ptLeftMonSeam = NSPoint(x: -50, y: 400)
-        let rLeftMonSeam = rectAtCursorBottomRight(ptLeftMonSeam, visible: vfLeftMonitor, w: bubbleW, h: bubbleH)
-        expect(approx(rLeftMonSeam.maxX, -6)
-                && rLeftMonSeam.maxX <= -6
-                && approx(rLeftMonSeam.maxY, 392)
-                && insideSafeArea(rLeftMonSeam, visible: vfLeftMonitor),
-               "左侧负坐标外接屏靠近交界处 (x=-50): 夹紧至 maxX=-6, 不跨屏跳入主屏")
-
-        // —— 9. 展开态浮窗夹紧 (clampRectToVisible) ——
-        let expandedInBounds = NSRect(x: 400, y: 300, width: 460, height: 380)
-        let cInBounds = clampRectToVisible(expandedInBounds, visible: vf)
-        expect(approx(cInBounds.minX, 400) && approx(cInBounds.minY, 300),
-               "展开态浮窗未超界: clampRectToVisible 保持原位置不变")
-
-        let expandedOverflowBR = NSRect(x: 1500, y: -120, width: 460, height: 380)
-        let cOverflowBR = clampRectToVisible(expandedOverflowBR, visible: vf)
-        expect(approx(cOverflowBR.maxX, vf.maxX - 6)
-                && approx(cOverflowBR.minY, vf.minY + 6)
-                && approx(cOverflowBR.width, 460)
-                && approx(cOverflowBR.height, 380)
-                && insideSafeArea(cOverflowBR, visible: vf),
-               "展开态浮窗超出右下边界: clampRectToVisible 严格夹紧在 vf.insetBy(dx:6, dy:6) 内")
-
-        let expandedOverflowTL = NSRect(x: -20, y: 800, width: 460, height: 380)
-        let cOverflowTL = clampRectToVisible(expandedOverflowTL, visible: vf)
-        expect(approx(cOverflowTL.minX, vf.minX + 6)
-                && approx(cOverflowTL.maxY, vf.maxY - 6)
-                && insideSafeArea(cOverflowTL, visible: vf),
-               "展开态浮窗超出左上边界: clampRectToVisible 严格夹紧在 vf.insetBy(dx:6, dy:6) 内")
-
-        // —— 10. 多屏框选截图坐标转换 (captureQuartzRect) ——
-        let mainScreenFrame = NSRect(x: 0, y: 0, width: 1728, height: 1117)
-        let qMain = captureQuartzRect(
-            localRect: NSRect(x: 100, y: 200, width: 300, height: 400),
-            screenFrame: mainScreenFrame,
-            primaryScreenHeight: 1117
+    static func test_each_overflowing_edge_clamps_to_six_point_safe_area() {
+        let visible = CGRect(x: 100, y: 50, width: 1000, height: 700)
+        let left = clampRectToVisible(
+            CGRect(x: 20, y: 250, width: 200, height: 120),
+            visible: visible
         )
-        expect(approx(qMain.origin.x, 100)
-                && approx(qMain.origin.y, 517)
-                && approx(qMain.width, 300)
-                && approx(qMain.height, 400),
-               "主屏(Screen 0)框选坐标转换: localRect(100,200,300,400) → Quartz(100,517,300,400)")
-
-        let subScreenFrame = NSRect(x: -2560, y: -116, width: 2560, height: 1440)
-        let qSubMid = captureQuartzRect(
-            localRect: NSRect(x: 500, y: 300, width: 600, height: 400),
-            screenFrame: subScreenFrame,
-            primaryScreenHeight: 1117
+        let right = clampRectToVisible(
+            CGRect(x: 1000, y: 250, width: 200, height: 120),
+            visible: visible
         )
-        expect(approx(qSubMid.origin.x, -2060)
-                && approx(qSubMid.origin.y, 533)
-                && approx(qSubMid.width, 600)
-                && approx(qSubMid.height, 400),
-               "左侧负坐标不等高副屏(Screen 1)中部框选转换: localRect(500,300,600,400) → Quartz(-2060,533,600,400)")
-
-        let qSubTop = captureQuartzRect(
-            localRect: NSRect(x: 100, y: 1250, width: 200, height: 150),
-            screenFrame: subScreenFrame,
-            primaryScreenHeight: 1117
+        let bottom = clampRectToVisible(
+            CGRect(x: 300, y: -40, width: 200, height: 120),
+            visible: visible
         )
-        expect(approx(qSubTop.origin.x, -2460)
-                && approx(qSubTop.origin.y, -167)
-                && approx(qSubTop.width, 200)
-                && approx(qSubTop.height, 150),
-               "左侧不等高副屏高于主屏顶部区域框选转换: localRect(100,1250,200,150) → Quartz(-2460,-167,200,150)")
-
-        // —— 11. 文本选区入口：10×10 可见方块中心与选区 AppKit 右下角重合 ——
-        let markerSize = NSSize(width: 10, height: 10)
-        let expandedSize = NSSize(width: 152, height: 34)
-        let selectionBounds = NSRect(x: 300, y: 420, width: 180, height: 44)
-        let selectionBottomRight = NSPoint(x: selectionBounds.maxX, y: selectionBounds.minY)
-        let entryNormal = selectionEntryLayout(
-            selectionBounds: selectionBounds,
-            releasePoint: NSPoint(x: 305, y: 462),
-            visible: vf,
-            markerSize: markerSize,
-            expandedSize: expandedSize
+        let top = clampRectToVisible(
+            CGRect(x: 300, y: 700, width: 200, height: 120),
+            visible: visible
         )
-        expect(approx(entryNormal.markerFrame.midX, selectionBottomRight.x)
-                && approx(entryNormal.markerFrame.midY, selectionBottomRight.y)
-                && approx(entryNormal.markerFrame.width, 10)
-                && approx(entryNormal.markerFrame.height, 10)
-                && insideVisibleFrame(entryNormal.markerFrame, visible: vf),
-               "test_selection_entry_marker_center_matches_selection_bottom_right")
 
-        // —— 12. 透明命中区为 22×22，默认与同一角点同心 ——
-        expect(approx(entryNormal.markerHitFrame.midX, selectionBottomRight.x)
-                && approx(entryNormal.markerHitFrame.midY, selectionBottomRight.y)
-                && approx(entryNormal.markerHitFrame.width, 22)
-                && approx(entryNormal.markerHitFrame.height, 22)
-                && entryNormal.markerHitFrame.contains(
-                    NSPoint(x: entryNormal.markerFrame.midX, y: entryNormal.markerFrame.midY)
+        GeometryTestSupport.expect(
+            GeometryTestSupport.approximatelyEqual(left.minX, 106)
+                && GeometryTestSupport.approximatelyEqual(left.minY, 250)
+                && GeometryTestSupport.approximatelyEqual(right.maxX, 1094)
+                && GeometryTestSupport.approximatelyEqual(right.minY, 250)
+                && GeometryTestSupport.approximatelyEqual(bottom.minX, 300)
+                && GeometryTestSupport.approximatelyEqual(bottom.minY, 56)
+                && GeometryTestSupport.approximatelyEqual(top.minX, 300)
+                && GeometryTestSupport.approximatelyEqual(top.maxY, 744)
+                && [left, right, bottom, top].allSatisfy {
+                    GeometryTestSupport.isInsideSafeArea($0, visibleFrame: visible)
+                },
+            "TestClampRectToVisible.test_each_overflowing_edge_clamps_to_six_point_safe_area"
+        )
+    }
+
+    static func test_negative_coordinate_display_clamps_without_crossing_to_primary() {
+        let visible = CGRect(x: -2560, y: -116, width: 2560, height: 1440)
+        let input = CGRect(x: -80, y: 300, width: 240, height: 180)
+
+        let result = clampRectToVisible(input, visible: visible)
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.approximatelyEqual(result.maxX, -6)
+                && GeometryTestSupport.approximatelyEqual(result.minY, 300)
+                && result.minX < 0
+                && result.maxX < 0
+                && GeometryTestSupport.isInsideSafeArea(result, visibleFrame: visible),
+            "TestClampRectToVisible.test_negative_coordinate_display_clamps_without_crossing_to_primary"
+        )
+    }
+}
+
+final class TestCursorAnchoredRect {
+    private static let size = CGSize(width: 152, height: 34)
+
+    static func test_normal_position_anchors_top_left_below_and_right_of_cursor() {
+        let visible = CGRect(x: 0, y: 0, width: 1800, height: 1100)
+        let cursor = CGPoint(x: 900, y: 500)
+
+        let result = rectAtCursorBottomRight(
+            cursor,
+            visible: visible,
+            w: size.width,
+            h: size.height
+        )
+        let compatibilityResult = rectNearPoint(
+            cursor,
+            visible: visible,
+            w: size.width,
+            h: size.height
+        )
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.approximatelyEqual(result.minX, 908)
+                && GeometryTestSupport.approximatelyEqual(result.maxY, 492)
+                && result.size == size
+                && GeometryTestSupport.rectEquals(compatibilityResult, result),
+            "TestCursorAnchoredRect.test_normal_position_anchors_top_left_below_and_right_of_cursor"
+        )
+    }
+
+    static func test_each_screen_edge_clamps_complete_rect_inside_visible_frame() {
+        let visible = CGRect(x: 0, y: 0, width: 1800, height: 1100)
+        let cursors = [
+            CGPoint(x: -20, y: 500),
+            CGPoint(x: 1790, y: 500),
+            CGPoint(x: 900, y: 10),
+            CGPoint(x: 900, y: 1120)
+        ]
+        let results = cursors.map {
+            rectAtCursorBottomRight($0, visible: visible, w: size.width, h: size.height)
+        }
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.approximatelyEqual(results[0].minX, 6)
+                && GeometryTestSupport.approximatelyEqual(results[1].maxX, 1794)
+                && GeometryTestSupport.approximatelyEqual(results[2].minY, 6)
+                && GeometryTestSupport.approximatelyEqual(results[3].maxY, 1094)
+                && results.allSatisfy {
+                    GeometryTestSupport.isInsideSafeArea($0, visibleFrame: visible)
+                },
+            "TestCursorAnchoredRect.test_each_screen_edge_clamps_complete_rect_inside_visible_frame"
+        )
+    }
+
+    static func test_negative_coordinate_display_keeps_rect_on_that_display() {
+        let visible = CGRect(x: -2560, y: -116, width: 2560, height: 1440)
+        let cursor = CGPoint(x: -50, y: 400)
+
+        let result = rectNearPoint(
+            cursor,
+            visible: visible,
+            w: size.width,
+            h: size.height
+        )
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.approximatelyEqual(result.maxX, -6)
+                && GeometryTestSupport.approximatelyEqual(result.maxY, 392)
+                && result.minX < 0
+                && result.maxX < 0
+                && GeometryTestSupport.isInsideSafeArea(result, visibleFrame: visible),
+            "TestCursorAnchoredRect.test_negative_coordinate_display_keeps_rect_on_that_display"
+        )
+    }
+}
+
+final class TestScreenCoordinateConversion {
+    private static let primaryHeight: CGFloat = 1117
+
+    static func test_primary_screen_capture_converts_bottom_left_to_quartz_top_left() {
+        let result = captureQuartzRect(
+            localRect: CGRect(x: 100, y: 200, width: 300, height: 400),
+            screenFrame: CGRect(x: 0, y: 0, width: 1728, height: 1117),
+            primaryScreenHeight: primaryHeight
+        )
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.rectEquals(
+                result,
+                CGRect(x: 100, y: 517, width: 300, height: 400)
+            ),
+            "TestScreenCoordinateConversion.test_primary_screen_capture_converts_bottom_left_to_quartz_top_left"
+        )
+    }
+
+    static func test_negative_uneven_secondary_screen_uses_global_multiscreen_coordinates() {
+        let secondary = CGRect(x: -2560, y: -116, width: 2560, height: 1440)
+        let middle = captureQuartzRect(
+            localRect: CGRect(x: 500, y: 300, width: 600, height: 400),
+            screenFrame: secondary,
+            primaryScreenHeight: primaryHeight
+        )
+        let abovePrimary = captureQuartzRect(
+            localRect: CGRect(x: 100, y: 1250, width: 200, height: 150),
+            screenFrame: secondary,
+            primaryScreenHeight: primaryHeight
+        )
+
+        GeometryTestSupport.expect(
+            GeometryTestSupport.rectEquals(
+                middle,
+                CGRect(x: -2060, y: 533, width: 600, height: 400)
+            )
+                && GeometryTestSupport.rectEquals(
+                    abovePrimary,
+                    CGRect(x: -2460, y: -167, width: 200, height: 150)
                 ),
-               "test_selection_entry_marker_has_22_point_transparent_hit_frame")
-
-        let entryReverseDrag = selectionEntryLayout(
-            selectionBounds: selectionBounds,
-            releasePoint: NSPoint(x: selectionBounds.minX, y: selectionBounds.maxY),
-            visible: vf,
-            markerSize: markerSize,
-            expandedSize: expandedSize
+            "TestScreenCoordinateConversion.test_negative_uneven_secondary_screen_uses_global_multiscreen_coordinates"
         )
-        expect(entryReverseDrag.markerFrame == entryNormal.markerFrame,
-               "test_reverse_drag_uses_selection_bounds_instead_of_release_endpoint")
+    }
 
-        // —— 13. 右边缘向屏内偏置，仍接触同一右下角，绝不翻到选区左下侧 ——
-        let rightEdgeSelection = NSRect(x: 1720, y: 500, width: 78, height: 28)
-        let rightEdgeCorner = NSPoint(x: rightEdgeSelection.maxX, y: rightEdgeSelection.minY)
-        let entryInsetFromRight = selectionEntryLayout(
-            selectionBounds: rightEdgeSelection,
-            releasePoint: rightEdgeCorner,
-            visible: vf,
-            markerSize: markerSize,
-            expandedSize: expandedSize
+    static func test_appkit_point_and_rect_convert_quartz_coordinates_back() {
+        let point = appKitPoint(
+            fromQuartz: CGPoint(x: -2460, y: -167),
+            primaryScreenHeight: primaryHeight
         )
-        expect(approx(entryInsetFromRight.markerFrame.maxX, rightEdgeCorner.x)
-                && entryInsetFromRight.markerFrame.minY <= rightEdgeCorner.y
-                && entryInsetFromRight.markerFrame.maxY >= rightEdgeCorner.y
-                && entryInsetFromRight.markerFrame.minX > rightEdgeSelection.midX
-                && insideVisibleFrame(entryInsetFromRight.markerFrame, visible: vf)
-                && insideVisibleFrame(entryInsetFromRight.markerHitFrame, visible: vf),
-               "test_selection_entry_right_edge_insets_around_same_corner_without_left_flip")
+        let quartzRect = CGRect(x: -2060, y: 533, width: 600, height: 400)
+        let rect = appKitRect(fromQuartz: quartzRect, primaryScreenHeight: primaryHeight)
 
-        // —— 14. 底边缘向屏内偏置，方块下边仍接触选区右下角 ——
-        let bottomSelection = NSRect(x: 700, y: 72, width: 120, height: 30)
-        let bottomCorner = NSPoint(x: bottomSelection.maxX, y: bottomSelection.minY)
-        let entryAboveDock = selectionEntryLayout(
-            selectionBounds: bottomSelection,
-            releasePoint: bottomCorner,
-            visible: vfWithDock,
-            markerSize: markerSize,
-            expandedSize: expandedSize
+        GeometryTestSupport.expect(
+            GeometryTestSupport.approximatelyEqual(point.x, -2460)
+                && GeometryTestSupport.approximatelyEqual(point.y, 1284)
+                && GeometryTestSupport.rectEquals(
+                    rect,
+                    CGRect(x: -2060, y: 184, width: 600, height: 400)
+                ),
+            "TestScreenCoordinateConversion.test_appkit_point_and_rect_convert_quartz_coordinates_back"
         )
-        expect(approx(entryAboveDock.markerFrame.minY, bottomCorner.y)
-                && entryAboveDock.markerFrame.minX <= bottomCorner.x
-                && entryAboveDock.markerFrame.maxX >= bottomCorner.x
-                && insideVisibleFrame(entryAboveDock.markerFrame, visible: vfWithDock)
-                && insideVisibleFrame(entryAboveDock.markerHitFrame, visible: vfWithDock)
-                && insideSafeArea(entryAboveDock.expandedFrame, visible: vfWithDock),
-               "test_selection_entry_bottom_edge_insets_around_same_corner")
+    }
 
-        // —— 15. 负坐标外接屏保持同一中心锚点和命中尺寸 ——
-        let negativeSelection = NSRect(x: -2200, y: 300, width: 210, height: 48)
-        let negativeCorner = NSPoint(x: negativeSelection.maxX, y: negativeSelection.minY)
-        let entryNegativeScreen = selectionEntryLayout(
-            selectionBounds: negativeSelection,
-            releasePoint: NSPoint(x: -2190, y: 340),
-            visible: vfLeftMonitor,
-            markerSize: markerSize,
-            expandedSize: expandedSize
+    static func test_capture_and_appkit_rect_round_trip_returns_global_selection() {
+        let screen = CGRect(x: -2560, y: -116, width: 2560, height: 1440)
+        let localSelection = CGRect(x: 500, y: 300, width: 600, height: 400)
+        let quartzRect = captureQuartzRect(
+            localRect: localSelection,
+            screenFrame: screen,
+            primaryScreenHeight: primaryHeight
         )
-        expect(approx(entryNegativeScreen.markerFrame.midX, negativeCorner.x)
-                && approx(entryNegativeScreen.markerFrame.midY, negativeCorner.y)
-                && approx(entryNegativeScreen.markerHitFrame.width, 22)
-                && approx(entryNegativeScreen.markerHitFrame.height, 22)
-                && entryNegativeScreen.markerFrame.maxX < 0
-                && entryNegativeScreen.expandedFrame.maxX < 0
-                && insideVisibleFrame(entryNegativeScreen.markerFrame, visible: vfLeftMonitor)
-                && insideSafeArea(entryNegativeScreen.expandedFrame, visible: vfLeftMonitor),
-               "test_selection_entry_stays_on_negative_coordinate_display")
 
-        // —— 16. 展开胶囊独立选择方向，不改变方块的右下角锚点 ——
-        expect(entryNormal.expansionDirection == .left
-                && approx(entryNormal.markerFrame.midX, selectionBottomRight.x)
-                && approx(entryNormal.markerFrame.midY, selectionBottomRight.y),
-               "test_selection_entry_expands_left_when_space_is_available")
+        let result = appKitRect(fromQuartz: quartzRect, primaryScreenHeight: primaryHeight)
+        let expectedGlobalSelection = localSelection.offsetBy(dx: screen.minX, dy: screen.minY)
 
-        let leftEdgeSelection = NSRect(x: 8, y: 600, width: 32, height: 24)
-        let entryExpandsRight = selectionEntryLayout(
-            selectionBounds: leftEdgeSelection,
-            releasePoint: NSPoint(x: leftEdgeSelection.maxX, y: leftEdgeSelection.minY),
-            visible: vf,
-            markerSize: markerSize,
-            expandedSize: expandedSize
+        GeometryTestSupport.expect(
+            GeometryTestSupport.rectEquals(result, expectedGlobalSelection),
+            "TestScreenCoordinateConversion.test_capture_and_appkit_rect_round_trip_returns_global_selection"
         )
-        expect(entryExpandsRight.expansionDirection == .right
-                && insideSafeArea(entryExpandsRight.expandedFrame, visible: vf),
-               "test_selection_entry_expands_right_when_left_side_has_no_space")
+    }
+}
 
-        // —— 17. 入口命中区、胶囊及两者间隙形成连续命中区域 ——
-        let bridgePoint = NSPoint(
-            x: (entryNormal.expandedFrame.maxX + entryNormal.markerFrame.minX) / 2,
-            y: entryNormal.markerFrame.midY
-        )
-        expect(entryNormal.continuousHitRegion.contains(
-                    NSPoint(x: entryNormal.markerHitFrame.midX, y: entryNormal.markerHitFrame.midY)
-                )
-                && entryNormal.continuousHitRegion.contains(
-                    NSPoint(x: entryNormal.expandedFrame.midX, y: entryNormal.expandedFrame.midY)
-                )
-                && entryNormal.continuousHitRegion.contains(bridgePoint),
-               "test_selection_entry_continuous_hit_region_bridges_marker_and_actions")
+@main
+struct GeometryTests {
+    static func main() {
+        TestClampRectToVisible.test_in_bounds_rect_preserves_origin_and_size()
+        TestClampRectToVisible.test_each_overflowing_edge_clamps_to_six_point_safe_area()
+        TestClampRectToVisible.test_negative_coordinate_display_clamps_without_crossing_to_primary()
+        TestCursorAnchoredRect.test_normal_position_anchors_top_left_below_and_right_of_cursor()
+        TestCursorAnchoredRect.test_each_screen_edge_clamps_complete_rect_inside_visible_frame()
+        TestCursorAnchoredRect.test_negative_coordinate_display_keeps_rect_on_that_display()
+        TestScreenCoordinateConversion.test_primary_screen_capture_converts_bottom_left_to_quartz_top_left()
+        TestScreenCoordinateConversion.test_negative_uneven_secondary_screen_uses_global_multiscreen_coordinates()
+        TestScreenCoordinateConversion.test_appkit_point_and_rect_convert_quartz_coordinates_back()
+        TestScreenCoordinateConversion.test_capture_and_appkit_rect_round_trip_returns_global_selection()
 
-        print(failures == 0 ? "ALL PASS" : "\(failures) FAILURES")
-        exit(failures == 0 ? 0 : 1)
+        if GeometryTestSupport.failures > 0 {
+            print("\n\(GeometryTestSupport.failures) geometry test(s) failed")
+            exit(1)
+        }
+        print("\nAll geometry tests passed")
     }
 }

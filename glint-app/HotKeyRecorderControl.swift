@@ -24,6 +24,11 @@ final class HotKeyRecorderControl: NSControl {
 
     required init?(coder: NSCoder) { fatalError() }
 
+    func setPurposeLabel(_ label: String) {
+        setAccessibilityLabel(label)
+        toolTip = "点击后直接录制\(label)"
+    }
+
     func setHotKey(_ value: ScreenshotHotKey) {
         hotKey = value
         if !isRecording { needsDisplay = true }
