@@ -44,9 +44,9 @@ struct ScreenshotHotKey: Codable, Equatable {
     }
 
     var isValid: Bool {
-        modifiers != 0
-            && !Self.reservedRecordingKeyCodes.contains(keyCode)
+        !Self.reservedRecordingKeyCodes.contains(keyCode)
             && !Self.physicalModifierKeyCodes.contains(keyCode)
+            && (modifiers != 0 || Self.unmodifiedAllowedKeyCodes.contains(keyCode))
     }
 
     var displayString: String {
@@ -91,6 +91,15 @@ struct ScreenshotHotKey: Codable, Equatable {
         UInt32(kVK_Function)
     ]
 
+    private static let unmodifiedAllowedKeyCodes: Set<UInt32> = [
+        UInt32(kVK_ANSI_Grave),
+        UInt32(kVK_F1), UInt32(kVK_F2), UInt32(kVK_F3), UInt32(kVK_F4),
+        UInt32(kVK_F5), UInt32(kVK_F6), UInt32(kVK_F7), UInt32(kVK_F8),
+        UInt32(kVK_F9), UInt32(kVK_F10), UInt32(kVK_F11), UInt32(kVK_F12),
+        UInt32(kVK_F13), UInt32(kVK_F14), UInt32(kVK_F15), UInt32(kVK_F16),
+        UInt32(kVK_F17), UInt32(kVK_F18), UInt32(kVK_F19), UInt32(kVK_F20)
+    ]
+
     private static func keyLabel(
         for keyCode: UInt32,
         keyLabelTranslator: (UInt32) -> String?
@@ -108,7 +117,8 @@ struct ScreenshotHotKey: Codable, Equatable {
             UInt32(kVK_End): "↘",
             UInt32(kVK_PageUp): "⇞",
             UInt32(kVK_PageDown): "⇟",
-            UInt32(kVK_Help): "Help"
+            UInt32(kVK_Help): "Help",
+            UInt32(kVK_ANSI_Grave): "`"
         ]
         if let label = special[keyCode] { return label }
 
@@ -202,4 +212,23 @@ struct ScreenshotHotKey: Codable, Equatable {
         UInt32(kVK_ANSI_Slash): "/",
         UInt32(kVK_ANSI_Grave): "`"
     ]
+}
+
+enum HotKeyRecordingFeedback {
+    static let invalidSingleKeyMessage = "可单独按 ` 或 F1–F20；其他按键需搭配修饰键"
+    static let recordingInstructions = "单独按 ` 或 F1–F20；其他按键搭配修饰键；Esc 取消，Delete 恢复默认"
+
+    static func status(
+        after decision: ScreenshotHotKey.RecordingDecision,
+        current: String
+    ) -> String {
+        switch decision {
+        case .invalid:
+            return invalidSingleKeyMessage
+        case .waitForKey:
+            return current
+        case .cancel, .restoreDefault, .commit:
+            return ""
+        }
+    }
 }

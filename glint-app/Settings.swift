@@ -129,14 +129,21 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     func runHotKeyRecorderSmokeTest() -> Bool {
         guard window != nil, currentTabIndex == 0 else { return false }
+        textCommandHotKeyRecorder.setHotKey(TextCommandHotKey.default.screenshotHotKey)
+        let defaultTextCommandIsGrave = TextCommandHotKey.default.displayString == "`"
+
         hotKeyRecorder.beginRecording()
         let enteredRecording = hotKeyRecorder.isRecording
         handleHotKeyRecordingDecision(.invalid)
         let invalidStayedRecording = hotKeyRecorder.isRecording
-            && hotKeyStatusLabel.stringValue.contains("修饰键")
+            && hotKeyStatusLabel.stringValue == HotKeyRecordingFeedback.invalidSingleKeyMessage
         handleHotKeyRecordingDecision(.cancel)
-        let cancelled = !hotKeyRecorder.isRecording
-        let passed = enteredRecording && invalidStayedRecording && cancelled
+        let cancelledAndCleared = !hotKeyRecorder.isRecording
+            && hotKeyStatusLabel.stringValue.isEmpty
+        let passed = defaultTextCommandIsGrave
+            && enteredRecording
+            && invalidStayedRecording
+            && cancelledAndCleared
         if passed { hotKeyRecorder.beginRecording() }
         return passed && hotKeyRecorder.isRecording
     }
@@ -260,12 +267,13 @@ final class SettingsController: NSObject, NSWindowDelegate {
                 self.textCommandHotKeyRecorder.cancelRecording()
                 self.textCommandHotKeyRecordingCoordinator.endRecording()
                 self.hotKeyStatusLabel.textColor = .secondaryLabelColor
-                self.hotKeyStatusLabel.stringValue = "按下组合键；Esc 取消，Delete 恢复默认"
+                self.hotKeyStatusLabel.stringValue = HotKeyRecordingFeedback.recordingInstructions
                 self.hotKeyRecordingCoordinator.beginRecording { [weak self] hotKey in
                     self?.hotKeyRecorder.receiveCurrentHotKey(hotKey)
                 }
             } else {
                 self.hotKeyRecordingCoordinator.endRecording()
+                self.hotKeyStatusLabel.stringValue = ""
             }
         }
         hotKeyRecorder.onDecision = { [weak self] decision in
@@ -297,12 +305,13 @@ final class SettingsController: NSObject, NSWindowDelegate {
                 self.hotKeyRecorder.cancelRecording()
                 self.hotKeyRecordingCoordinator.endRecording()
                 self.textCommandHotKeyStatusLabel.textColor = .secondaryLabelColor
-                self.textCommandHotKeyStatusLabel.stringValue = "按下组合键；Esc 取消，Delete 恢复默认"
+                self.textCommandHotKeyStatusLabel.stringValue = HotKeyRecordingFeedback.recordingInstructions
                 self.textCommandHotKeyRecordingCoordinator.beginRecording { [weak self] hotKey in
                     self?.textCommandHotKeyRecorder.receiveCurrentHotKey(hotKey.screenshotHotKey)
                 }
             } else {
                 self.textCommandHotKeyRecordingCoordinator.endRecording()
+                self.textCommandHotKeyStatusLabel.stringValue = ""
             }
         }
         textCommandHotKeyRecorder.onDecision = { [weak self] decision in
@@ -315,7 +324,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         textCommandHotKeyStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         textCommandHotKeyStatusLabel.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
-        let textCommandDescription = NSTextField(labelWithString: "选中文字后显示翻译 / 提问；默认 ⌃⌥T")
+        let textCommandDescription = NSTextField(labelWithString: "选中文字后显示翻译 / 提问；默认 ` 键")
         textCommandDescription.font = .systemFont(ofSize: 12)
         textCommandDescription.textColor = .secondaryLabelColor
         let textCommandControls = NSStackView(views: [textCommandHotKeyRecorder, textCommandDescription])
@@ -606,15 +615,20 @@ final class SettingsController: NSObject, NSWindowDelegate {
     @objc private func closeWin() { window?.close() }
 
     private func handleHotKeyRecordingDecision(_ decision: ScreenshotHotKey.RecordingDecision) {
+        let feedback = HotKeyRecordingFeedback.status(
+            after: decision,
+            current: hotKeyStatusLabel.stringValue
+        )
         switch decision {
         case .waitForKey:
+            hotKeyStatusLabel.stringValue = feedback
             return
         case .invalid:
             hotKeyStatusLabel.textColor = .systemRed
-            hotKeyStatusLabel.stringValue = "请同时按下修饰键和一个按键"
+            hotKeyStatusLabel.stringValue = feedback
         case .cancel:
             hotKeyRecorder.cancelRecording()
-            hotKeyStatusLabel.stringValue = ""
+            hotKeyStatusLabel.stringValue = feedback
         case .restoreDefault:
             applyScreenshotHotKey(.default)
         case .commit(let hotKey):
@@ -667,15 +681,20 @@ final class SettingsController: NSObject, NSWindowDelegate {
     private func handleTextCommandHotKeyRecordingDecision(
         _ decision: ScreenshotHotKey.RecordingDecision
     ) {
+        let feedback = HotKeyRecordingFeedback.status(
+            after: decision,
+            current: textCommandHotKeyStatusLabel.stringValue
+        )
         switch decision {
         case .waitForKey:
+            textCommandHotKeyStatusLabel.stringValue = feedback
             return
         case .invalid:
             textCommandHotKeyStatusLabel.textColor = .systemRed
-            textCommandHotKeyStatusLabel.stringValue = "请同时按下修饰键和一个按键"
+            textCommandHotKeyStatusLabel.stringValue = feedback
         case .cancel:
             textCommandHotKeyRecorder.cancelRecording()
-            textCommandHotKeyStatusLabel.stringValue = ""
+            textCommandHotKeyStatusLabel.stringValue = feedback
         case .restoreDefault:
             applyTextCommandHotKey(.default)
         case .commit(let hotKey):

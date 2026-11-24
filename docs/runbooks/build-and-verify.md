@@ -7,8 +7,14 @@
 通过 `harness run` 在隔离沙盒中编译并执行测试：
 
 ```bash
+# 安全单键规则、零修饰键注册与截图快捷键既有契约
+harness run hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_test"'
+
 # 文字命令快捷键、配置迁移、冲突与切换事务
 harness run text-command-hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/text_command_hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/text_command_hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/text_command_hotkey_test"'
+
+# 录制提示、非法单键错误与状态清理
+harness run hotkey-recording-feedback-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_recording_feedback_test" glint-app/ScreenshotHotKey.swift glint-app/hotkey_recording_feedback_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_recording_feedback_test"'
 
 # AX 优先、受保护复制过滤与剪贴板事务
 harness run selected-text-extractor-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selected_text_extractor_test" glint-app/SelectedTextExtractor.swift glint-app/selected_text_extractor_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/selected_text_extractor_test"'
@@ -30,9 +36,6 @@ harness run azure-services-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_W
 
 # 结果窗口图钉 / 隐藏 / 恢复
 harness run popup-lifecycle-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/popup_test" glint-app/PopupLifecycle.swift glint-app/popup_lifecycle_tests.swift && "$HARNESS_WORK_DIR/popup_test"'
-
-# 截图快捷键既有契约
-harness run hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_test"'
 
 # 设置窗口录制与 Carbon 生命周期
 harness run hotkey-recording-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/hotkey_recording_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test"'

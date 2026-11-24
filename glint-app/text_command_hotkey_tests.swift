@@ -113,19 +113,21 @@ final class TestTextCommandHotKeyValueAndMigration {
         supportsVision: true
     )
 
-    static func test_default_value_is_control_option_t_and_screenshot_default_is_unchanged() {
+    static func test_default_value_is_unmodified_grave_and_screenshot_default_is_unchanged() {
         let textCommand = TextCommandHotKey.default
         let screenshot = ScreenshotHotKey.default
 
         TextCommandHotKeyTestSupport.expect(
-            textCommand.keyCode == UInt32(kVK_ANSI_T)
-                && textCommand.modifiers == UInt32(controlKey | optionKey)
+            textCommand.keyCode == UInt32(kVK_ANSI_Grave)
+                && textCommand.modifiers == 0
                 && textCommand.isValid
-                && textCommand.displayString == "⌃⌥T"
+                && textCommand.screenshotHotKey.displayString(
+                    keyLabelTranslator: { _ in nil }
+                ) == "`"
                 && screenshot.keyCode == UInt32(kVK_ANSI_E)
                 && screenshot.modifiers == UInt32(controlKey | optionKey)
                 && screenshot.displayString == "⌃⌥E",
-            "TestTextCommandHotKeyValueAndMigration.test_default_value_is_control_option_t_and_screenshot_default_is_unchanged"
+            "TestTextCommandHotKeyValueAndMigration.test_default_value_is_unmodified_grave_and_screenshot_default_is_unchanged"
         )
     }
 
@@ -196,6 +198,75 @@ final class TestTextCommandHotKeyValueAndMigration {
         )
     }
 
+    static func test_saved_old_default_is_migrated_and_persisted_without_changing_azure_or_screenshot() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glint-text-command-old-default-\(UUID().uuidString)", isDirectory: true)
+        let configURL = directory.appendingPathComponent("config.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let customScreenshot = ScreenshotHotKey(
+            keyCode: UInt32(kVK_ANSI_Q),
+            modifiers: UInt32(controlKey | shiftKey)
+        )
+        let oldDefault = TextCommandHotKey(
+            keyCode: UInt32(kVK_ANSI_T),
+            modifiers: UInt32(controlKey | optionKey)
+        )
+        let migratedDefault = TextCommandHotKey(
+            keyCode: UInt32(kVK_ANSI_Grave),
+            modifiers: 0
+        )
+        let stored = AppConfig(
+            translator: translator,
+            azureOpenAI: gpt,
+            screenshotHotKey: customScreenshot,
+            textCommandHotKey: oldDefault
+        )
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        _ = stored.save(to: configURL)
+
+        let loaded = AppConfig.loadOrCreate(at: configURL)
+        let persisted = AppConfig.load(from: configURL)
+
+        TextCommandHotKeyTestSupport.expect(
+            loaded.textCommandHotKey == migratedDefault
+                && persisted?.textCommandHotKey == migratedDefault
+                && persisted?.translator == translator
+                && persisted?.azureOpenAI == gpt
+                && persisted?.screenshotHotKey == customScreenshot,
+            "TestTextCommandHotKeyValueAndMigration.test_saved_old_default_is_migrated_and_persisted_without_changing_azure_or_screenshot"
+        )
+    }
+
+    static func test_saved_custom_text_command_is_not_replaced_by_default_migration() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("glint-text-command-custom-\(UUID().uuidString)", isDirectory: true)
+        let configURL = directory.appendingPathComponent("config.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let customTextCommand = TextCommandHotKey(
+            keyCode: UInt32(kVK_ANSI_K),
+            modifiers: UInt32(cmdKey | optionKey)
+        )
+        let stored = AppConfig(
+            translator: translator,
+            azureOpenAI: gpt,
+            screenshotHotKey: ScreenshotHotKey.default,
+            textCommandHotKey: customTextCommand
+        )
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        _ = stored.save(to: configURL)
+
+        let loaded = AppConfig.loadOrCreate(at: configURL)
+        let persisted = AppConfig.load(from: configURL)
+
+        TextCommandHotKeyTestSupport.expect(
+            loaded.textCommandHotKey == customTextCommand
+                && persisted?.textCommandHotKey == customTextCommand,
+            "TestTextCommandHotKeyValueAndMigration.test_saved_custom_text_command_is_not_replaced_by_default_migration"
+        )
+    }
+
     static func test_decoding_json_with_extra_modifier_bits_normalizes_stored_value() {
         let rawModifiers = UInt32(controlKey | optionKey) | UInt32(0x8000_0000)
         let data = try! JSONSerialization.data(withJSONObject: [
@@ -208,7 +279,10 @@ final class TestTextCommandHotKeyValueAndMigration {
         TextCommandHotKeyTestSupport.expect(
             decoded?.keyCode == UInt32(kVK_ANSI_T)
                 && decoded?.modifiers == UInt32(controlKey | optionKey)
-                && decoded == TextCommandHotKey.default,
+                && decoded == TextCommandHotKey(
+                    keyCode: UInt32(kVK_ANSI_T),
+                    modifiers: UInt32(controlKey | optionKey)
+                ),
             "TestTextCommandHotKeyValueAndMigration.test_decoding_json_with_extra_modifier_bits_normalizes_stored_value"
         )
     }
@@ -256,6 +330,47 @@ final class TestTextCommandHotKeyConflictAndTransaction {
                 && persistCalls == 0
                 && registrar.registrations.first?.isActive == true,
             "TestTextCommandHotKeyConflictAndTransaction.test_candidate_equal_to_screenshot_is_rejected_before_registration_or_save"
+        )
+    }
+
+    static func test_unmodified_function_key_equal_to_screenshot_is_rejected_as_conflict() {
+        let registrar = TestTextCommandHotKeyRegistrar(outcomes: [.success()])
+        let oldTextCommand = TextCommandHotKey(
+            keyCode: UInt32(kVK_ANSI_T),
+            modifiers: UInt32(controlKey | optionKey)
+        )
+        let singleScreenshot = ScreenshotHotKey(
+            keyCode: UInt32(kVK_F12),
+            modifiers: 0
+        )
+        var saved = oldTextCommand
+        var persistCalls = 0
+        let manager = TextCommandHotKeyManager(
+            savedHotKey: oldTextCommand,
+            screenshotHotKey: singleScreenshot,
+            registrar: registrar,
+            persist: {
+                persistCalls += 1
+                saved = $0
+                return true
+            },
+            onTextCommand: {}
+        )
+        let registrationsBeforeApply = registrar.registerCallCount
+        let conflicting = TextCommandHotKey(
+            keyCode: UInt32(kVK_F12),
+            modifiers: 0
+        )
+
+        let result = manager.apply(conflicting)
+
+        TextCommandHotKeyTestSupport.expect(
+            result == .conflictsWithScreenshot
+                && manager.effectiveHotKey == oldTextCommand
+                && saved == oldTextCommand
+                && registrar.registerCallCount == registrationsBeforeApply
+                && persistCalls == 0,
+            "TestTextCommandHotKeyConflictAndTransaction.test_unmodified_function_key_equal_to_screenshot_is_rejected_as_conflict"
         )
     }
 
@@ -387,11 +502,14 @@ final class TestTextCommandHotKeyRecordingRoute {
 @main
 struct TextCommandHotKeyTests {
     static func main() {
-        TestTextCommandHotKeyValueAndMigration.test_default_value_is_control_option_t_and_screenshot_default_is_unchanged()
+        TestTextCommandHotKeyValueAndMigration.test_default_value_is_unmodified_grave_and_screenshot_default_is_unchanged()
         TestTextCommandHotKeyValueAndMigration.test_legacy_config_without_text_command_field_preserves_azure_and_custom_screenshot_values()
         TestTextCommandHotKeyValueAndMigration.test_new_config_round_trip_preserves_both_independent_hot_keys()
+        TestTextCommandHotKeyValueAndMigration.test_saved_old_default_is_migrated_and_persisted_without_changing_azure_or_screenshot()
+        TestTextCommandHotKeyValueAndMigration.test_saved_custom_text_command_is_not_replaced_by_default_migration()
         TestTextCommandHotKeyValueAndMigration.test_decoding_json_with_extra_modifier_bits_normalizes_stored_value()
         TestTextCommandHotKeyConflictAndTransaction.test_candidate_equal_to_screenshot_is_rejected_before_registration_or_save()
+        TestTextCommandHotKeyConflictAndTransaction.test_unmodified_function_key_equal_to_screenshot_is_rejected_as_conflict()
         TestTextCommandHotKeyConflictAndTransaction.test_registration_failure_keeps_old_text_command_active()
         TestTextCommandHotKeyConflictAndTransaction.test_persistence_failure_removes_inactive_candidate_and_keeps_old_text_command_active()
         TestTextCommandHotKeyConflictAndTransaction.test_old_unregistration_failure_rolls_back_saved_value_and_keeps_old_text_command_active()
