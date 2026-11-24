@@ -5,7 +5,14 @@ import Foundation
 // 持久化到 ~/.config/glint/config.json。
 // ============================================================
 
-let kConfigDir = (("~/.config/glint" as NSString).expandingTildeInPath)
+let kConfigDir: String = {
+    if let override = ProcessInfo.processInfo.environment["GLINT_CONFIG_DIR"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+       !override.isEmpty {
+        return (override as NSString).expandingTildeInPath
+    }
+    return (("~/.config/glint" as NSString).expandingTildeInPath)
+}()
 let kLogPath = kConfigDir + "/glint.log"
 
 enum APIFormat: String, Codable, CaseIterable, Equatable {

@@ -960,6 +960,34 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
+    private enum DisplayMode: Equatable {
+        case current
+        case history(String)
+    }
+
+    private enum SuspendedCurrentWindow {
+        case translation(
+            resultText: String,
+            frame: NSRect,
+            isPinned: Bool
+        )
+        case composer(
+            context: SessionContext,
+            draft: String,
+            frame: NSRect,
+            questionHistoryID: String?
+        )
+        case conversation(
+            context: SessionContext,
+            turns: [ConversationTurn],
+            draft: String,
+            errorMessage: String?,
+            frame: NSRect,
+            isPinned: Bool,
+            questionHistoryID: String?
+        )
+    }
+
     private var panel: NSPanel?
     private var body: NSView?
     private var pendingText: String?
@@ -979,10 +1007,16 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var inputEnabledState = false                        // 输入框整体可用开关(发送按钮另叠加非空校验)
     private var contextHeaderEndLoc = 0                          // 会话 transcript 顶部上下文预览区结束位置
     private var lastErrorLoc: Int?                               // 最近一次错误提示在 transcript 的起点,重试前清理
+    private var conversationErrorMessage: String?
     private var convoTextView: NSTextView?                       // 整段对话的 transcript
     private var convoScroll: NSScrollView?
     private var askField: FocusAwareTextField?                   // 底部提问/追问输入框
     private var convoTask: Task<Void, Never>?
+    private var translationRequestInFlight = false
+    private var questionHistoryID: String?
+    private var recentResults = RecentResultStore()
+    private var displayMode: DisplayMode = .current
+    private var suspendedCurrentWindow: SuspendedCurrentWindow?
     private var assistantStart = 0                               // 当前 assistant 流式段在 transcript 的起点
     private var assistantAccum = ""
     private var turnStartLoc = 0                                 // 本轮(含提问/追问气泡)在 transcript 的起点,失败可整轮回滚
@@ -1010,6 +1044,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     var isVisible: Bool { panel?.isVisible ?? false }
     var canRestore: Bool { panel != nil && lifecycle.canRestore }
+    var canShowCurrentWindow: Bool { suspendedCurrentWindow != nil || canRestore }
+    var recentResultEntries: [RecentResultEntry] { recentResults.entries }
+    var historySwitchingEnabled: Bool { !translationRequestInFlight && convoTask == nil }
     var isPinned: Bool { lifecycle.isPinned }
     var shouldIgnoreNewSelection: Bool { lifecycle.newSelection() == .ignore }
     func frame() -> NSRect? { panel?.frame }
@@ -1019,12 +1056,21 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     @objc func dismiss() {
         guard let p = panel else { return }
         NSCursor.arrow.set()
+        let wasHistory: Bool
+        if case .history = displayMode { wasHistory = true } else { wasHistory = false }
         lifecycle.dismiss()
         hiddenFrame = nil
         lockFrameAfterRestore = false
         generation += 1
+        translationRequestInFlight = false
         stopConversation()
         panel = nil; body = nil; pendingText = nil; pinButton = nil
+        lastResult = nil; copyButton = nil
+        if wasHistory {
+            displayMode = .current
+        } else {
+            suspendedCurrentWindow = nil
+        }
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = self.dismissDur
             ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
@@ -1062,6 +1108,59 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         return true
     }
 
+    @discardableResult
+    func showCurrentWindow() -> Bool {
+        guard let snapshot = suspendedCurrentWindow else {
+            return restoreLastWindow()
+        }
+        replaceVisiblePanelForModeSwitch()
+        displayMode = .current
+        suspendedCurrentWindow = nil
+        restoreCurrentWindow(snapshot)
+        gAppDelegate?.refreshMenu()
+        return true
+    }
+
+    func showRecentResult(id: String) {
+        guard historySwitchingEnabled else { return }
+        guard let entry = recentResults.entry(id: id) else {
+            logLine(RecentResultsLogEvent.routeMissing(
+                entryID: id,
+                count: recentResults.entries.count
+            ).message)
+            gAppDelegate?.refreshMenu()
+            return
+        }
+
+        if displayMode == .current, suspendedCurrentWindow == nil {
+            suspendedCurrentWindow = captureCurrentWindow()
+        }
+        replaceVisiblePanelForModeSwitch()
+        displayMode = .history(entry.id)
+        switch entry.snapshot {
+        case .translation(_, let resultText):
+            showMessage(resultText, isError: false, showCopy: true, markdown: true)
+        case .question(let selectedText, let transcript):
+            showReadOnlyQuestionHistory(
+                selectedText: selectedText,
+                transcript: transcript,
+                anchorTopLeft: NSEvent.mouseLocation
+            )
+        }
+        gAppDelegate?.refreshMenu()
+    }
+
+    func clearRecentResults() {
+        let previousCount = recentResults.entries.count
+        recentResults.removeAll()
+        logLine(RecentResultsLogEvent.cleared(previousCount: previousCount).message)
+        if case .history = displayMode {
+            dismiss()
+        } else {
+            gAppDelegate?.refreshMenu()
+        }
+    }
+
     @objc private func onTogglePin() {
         guard lifecycle.togglePin() else { return }
         updatePinButton()
@@ -1070,6 +1169,292 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func updatePinButton() {
         pinButton?.iconKind = lifecycle.isPinned ? .pinned : .pin
         pinButton?.toolTip = lifecycle.isPinned ? "取消钉住" : "钉住窗口"
+    }
+
+    private func captureCurrentWindow() -> SuspendedCurrentWindow? {
+        guard displayMode == .current,
+              panelIsRestorable,
+              let currentPanel = panel else { return nil }
+        let currentFrame = hiddenFrame ?? currentPanel.frame
+        if let context = sessionContext {
+            let draft = askField?.stringValue ?? ""
+            if isAwaitingInitialPrompt {
+                return .composer(
+                    context: context,
+                    draft: draft,
+                    frame: currentFrame,
+                    questionHistoryID: questionHistoryID
+                )
+            }
+            return .conversation(
+                context: context,
+                turns: convo,
+                draft: draft,
+                errorMessage: conversationErrorMessage,
+                frame: currentFrame,
+                isPinned: lifecycle.isPinned,
+                questionHistoryID: questionHistoryID
+            )
+        }
+        if let resultText = lastResult, !resultText.isEmpty {
+            return .translation(
+                resultText: resultText,
+                frame: currentFrame,
+                isPinned: lifecycle.isPinned
+            )
+        }
+        return nil
+    }
+
+    private func replaceVisiblePanelForModeSwitch() {
+        generation += 1
+        translationRequestInFlight = false
+        stopConversation()
+        growTimer?.invalidate()
+        growTimer = nil
+        panel?.orderOut(nil)
+        panel = nil
+        body = nil
+        pendingText = nil
+        lastResult = nil
+        copyButton = nil
+        pinButton = nil
+        frameAnimations = 0
+        hiddenFrame = nil
+        lockFrameAfterRestore = false
+        panelIsResizable = false
+        panelIsRestorable = false
+        lifecycle.dismiss()
+    }
+
+    private func restoreCurrentWindow(_ snapshot: SuspendedCurrentWindow) {
+        switch snapshot {
+        case .translation(let resultText, let frame, let wasPinned):
+            let anchor = NSPoint(x: frame.minX, y: frame.maxY)
+            showMessage(
+                resultText,
+                isError: false,
+                showCopy: true,
+                markdown: true,
+                anchorTopLeft: anchor
+            )
+            applyRestoredFrame(frame)
+            restorePinIfNeeded(wasPinned)
+
+        case .composer(let context, let draft, let frame, let historyID):
+            showPromptComposer(
+                context: context,
+                anchorTopLeft: NSPoint(x: frame.minX, y: frame.maxY)
+            )
+            questionHistoryID = historyID
+            askField?.stringValue = draft
+            updateSendButtonState()
+            applyRestoredFrame(frame)
+
+        case .conversation(
+            let context,
+            let turns,
+            let draft,
+            let errorMessage,
+            let frame,
+            let wasPinned,
+            let historyID
+        ):
+            restoreConversation(
+                context: context,
+                turns: turns,
+                draft: draft,
+                errorMessage: errorMessage,
+                frame: frame,
+                questionHistoryID: historyID
+            )
+            restorePinIfNeeded(wasPinned)
+        }
+    }
+
+    private func applyRestoredFrame(_ frame: NSRect) {
+        programmaticSize = frame.size
+        panel?.setFrame(frame, display: true)
+    }
+
+    private func restorePinIfNeeded(_ shouldPin: Bool) {
+        guard shouldPin, lifecycle.togglePin() else { return }
+        updatePinButton()
+    }
+
+    private func restoreConversation(
+        context: SessionContext,
+        turns: [ConversationTurn],
+        draft: String,
+        errorMessage: String?,
+        frame: NSRect,
+        questionHistoryID: String?
+    ) {
+        generation += 1
+        stopConversation()
+        sessionContext = context
+        convo = turns
+        self.questionHistoryID = questionHistoryID
+        isAwaitingInitialPrompt = false
+        let topLeft = NSPoint(x: frame.minX, y: frame.maxY)
+        installConversationPanel(topLeft: topLeft)
+        guard let tv = convoTextView, let storage = tv.textStorage else { return }
+        appendContext(context, to: tv)
+        contextHeaderEndLoc = storage.length
+        appendTranscript(turns, to: tv)
+        if let errorMessage {
+            lastErrorLoc = storage.length
+            conversationErrorMessage = errorMessage
+            storage.append(NSAttributedString(string: "\n⚠️ \(errorMessage)\n", attributes: [
+                .font: convoFont,
+                .foregroundColor: ClaudeTheme.terracotta,
+                .paragraphStyle: MD.bodyStyle()
+            ]))
+        }
+        lastResult = turns.last(where: { $0.role == "assistant" })?.content
+        askField?.stringValue = draft
+        setInputEnabled(true, placeholder: "继续追问… (回车发送)")
+        updateSendButtonState()
+        applyRestoredFrame(frame)
+        lockFrameAfterRestore = true
+        scrollTranscriptToBottom()
+    }
+
+    private func appendContext(_ context: SessionContext, to textView: NSTextView) {
+        switch context {
+        case .text(let text):
+            appendContextQuoteCard(text, to: textView)
+        case .image(let image, _):
+            textView.textStorage?.append(thumbnailString(
+                image,
+                maxW: (panel?.frame.width ?? savedPopupSize().width) - convoPad * 2
+            ))
+        }
+    }
+
+    private func appendTranscript(_ turns: [ConversationTurn], to textView: NSTextView) {
+        var userIndex = 0
+        for turn in turns {
+            if turn.role == "user" {
+                userIndex += 1
+                appendUserBubble(
+                    turn.content,
+                    label: userIndex == 1 ? "你的提问" : "你的追问",
+                    isFirstTurn: userIndex == 1,
+                    to: textView
+                )
+            } else if turn.role == "assistant" {
+                let rendered = MD.render(
+                    turn.content,
+                    width: (panel?.frame.width ?? convoW) - convoPad * 2,
+                    baseFont: convoFont,
+                    textColor: ClaudeTheme.inkBody
+                )
+                textView.textStorage?.append(rendered)
+            }
+        }
+    }
+
+    private func showReadOnlyQuestionHistory(
+        selectedText: String,
+        transcript: [RecentResultTurn],
+        anchorTopLeft: NSPoint
+    ) {
+        panelIsResizable = true
+        panelIsRestorable = true
+        userResized = false
+        let size = savedPopupSize()
+        let vf = screenFor(point: anchorTopLeft).visibleFrame
+        let height = min(max(size.height, minPopupSize.height), popupHeightCap(vf))
+        let width = min(size.width, max(minPopupSize.width, vf.width - kScreenEdgeGap * 2))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        container.autoresizingMask = [.width, .height]
+
+        let scrollerGutter: CGFloat = 14
+        let scroll = NonDraggableScrollView(frame: NSRect(
+            x: convoPad,
+            y: 18,
+            width: width - convoPad * 2 + scrollerGutter,
+            height: height - headerTopH - 28
+        ))
+        configureWarmScrollView(scroll)
+        scroll.hasVerticalScroller = true
+        scroll.autoresizingMask = [.width, .height]
+        let textView = makeTranscriptView(
+            width: width - convoPad * 2,
+            scrollerGutter: scrollerGutter
+        )
+        scroll.documentView = textView
+        container.addSubview(scroll)
+
+        appendContextQuoteCard(selectedText, to: textView)
+        appendRecentTranscript(transcript, to: textView)
+        lastResult = plainRecentTranscript(transcript)
+        addTopRightActions(to: container, showCopy: true)
+        addGrip(to: container)
+
+        var rect = NSRect(
+            x: anchorTopLeft.x,
+            y: anchorTopLeft.y - height,
+            width: width,
+            height: height
+        )
+        rect = clampToScreen(rect, anchor: anchorTopLeft)
+        present(content: container, rect: rect, isPill: false)
+        textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+    }
+
+    private func appendRecentTranscript(
+        _ transcript: [RecentResultTurn],
+        to textView: NSTextView
+    ) {
+        var userIndex = 0
+        for turn in transcript {
+            switch turn.role {
+            case .user:
+                userIndex += 1
+                appendUserBubble(
+                    turn.content,
+                    label: userIndex == 1 ? "你的提问" : "你的追问",
+                    isFirstTurn: userIndex == 1,
+                    to: textView
+                )
+            case .assistant:
+                textView.textStorage?.append(MD.render(
+                    turn.content,
+                    width: (panel?.frame.width ?? convoW) - convoPad * 2,
+                    baseFont: convoFont,
+                    textColor: ClaudeTheme.inkBody
+                ))
+            }
+        }
+    }
+
+    private func plainRecentTranscript(_ transcript: [RecentResultTurn]) -> String {
+        transcript.map { turn in
+            let label = turn.role == .user ? "提问" : "回答"
+            return "\(label)：\(turn.content)"
+        }.joined(separator: "\n\n")
+    }
+
+    private func recordRecentResult(_ completion: RecentResultCompletion) {
+        guard let entry = RecentResultRecorder.makeEntry(from: completion) else { return }
+        let mutation = recentResults.upsert(entry)
+        logLine(RecentResultsLogEvent.upserted(
+            entryID: entry.id,
+            kind: entry.kind,
+            count: recentResults.entries.count,
+            mutation: mutation
+        ).message)
+        gAppDelegate?.refreshMenu()
+    }
+
+    private func recentMenuSummary(_ raw: String) -> String {
+        PromptContextBuilder.previewSnippet(for: raw, maxLines: 1, maxChars: 48)
+    }
+
+    private func recentContextSummary(_ raw: String) -> String {
+        PromptContextBuilder.previewSnippet(for: raw, maxLines: 4, maxChars: 240)
     }
 
     // 切换背板的圆角与边框色(快捷悬浮条:10pt 圆角 + #E3E1D8;展开大弹窗:14pt 圆角 + #E8E6DE)
@@ -1082,6 +1467,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     // 文字命令提交后的快捷操作条(Segmented Pill:4px 内边距、无硬分割线、1.5px 线性图标、#EFECE6 独立悬停块)
     func showButton(text: String, fallbackPoint: NSPoint) {
         NSCursor.arrow.set()
+        displayMode = .current
+        suspendedCurrentWindow = nil
+        translationRequestInFlight = false
         generation += 1
         stopConversation()
         if let old = panel {
@@ -1196,14 +1584,25 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         prepareForSelectionAction(text: text)
         generation += 1   // 作废上一次在途回调(与解释/截图一致)
         let gen = generation
+        translationRequestInFlight = true
         showMessage("翻译中…", isError: false, anchorTopLeft: anchorTopLeft)
         translate(text) { [weak self] result, errMsg in
             guard let self = self, gen == self.generation else { return }   // 浮窗已被关闭/换词:丢弃结果
+            self.translationRequestInFlight = false
             if let errMsg = errMsg {
                 self.showMessage(errMsg, isError: true)
             } else {
-                self.showMessage(result ?? "(空)", isError: false, showCopy: true, markdown: true)
+                let finalResult = result ?? "(空)"
+                self.showMessage(finalResult, isError: false, showCopy: true, markdown: true)
+                self.recordRecentResult(.translationSucceeded(
+                    id: UUID().uuidString,
+                    sourceText: self.recentContextSummary(text),
+                    resultText: finalResult,
+                    menuSummary: self.recentMenuSummary(text),
+                    completedAt: Date()
+                ))
             }
+            gAppDelegate?.refreshMenu()
         }
     }
 
@@ -1235,7 +1634,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         )
         closeBtn.target = self
         closeBtn.action = #selector(dismiss)
-        closeBtn.toolTip = "关闭并清除会话"
+        closeBtn.toolTip = "关闭窗口"
         closeBtn.autoresizingMask = [.minXMargin, .minYMargin]
         container.addSubview(closeBtn)
 
@@ -1287,6 +1686,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     }
 
     private func prepareForSelectionAction(text: String) {
+        displayMode = .current
+        suspendedCurrentWindow = nil
+        translationRequestInFlight = false
         generation += 1
         stopConversation()
         if let old = panel {
@@ -1305,6 +1707,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     // 截图后将图像编码并暂存于内存,弹出紧凑提问卡片等待用户输入 Prompt
     func showImagePromptComposer(image: NSImage) {
+        displayMode = .current
+        suspendedCurrentWindow = nil
+        translationRequestInFlight = false
         guard let dataURL = RegionCapture.encodeToDataURL(image) else {
             generation += 1
             stopConversation()
@@ -1322,6 +1727,12 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         generation += 1
         stopConversation()
         sessionContext = context
+        switch context {
+        case .text:
+            questionHistoryID = UUID().uuidString
+        case .image:
+            questionHistoryID = nil
+        }
         convo = []
         isAwaitingInitialPrompt = true
         panelIsResizable = false
@@ -1555,7 +1966,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
             self.onTogglePin()
             self.handleOutsideClick()
-            let restoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+            let restoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示当前窗口")?.isEnabled == true
             guard !self.isVisible, self.canRestore, restoreEnabled else {
                 fputs("FAIL: unpinned popup did not become restorable\n", stderr)
                 exit(1)
@@ -1595,7 +2006,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 askField.stringValue = "这条未发送的提问草稿需要保留"
                 self.onTogglePin()
                 self.handleOutsideClick()
-                let promptRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+                let promptRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示当前窗口")?.isEnabled == true
                 guard !self.isVisible, self.canRestore, !self.isPinned, promptRestoreEnabled else {
                     fputs("FAIL: prompt composer did not hide as an unpinned restorable window\n", stderr)
                     exit(1)
@@ -1632,7 +2043,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                     let closeTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 30_000_000_000) }
                     self.convoTask = closeTask
                     closeButton.performClick(nil)
-                    let closeRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+                    let closeRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示当前窗口")?.isEnabled == true
                     guard closeTask.isCancelled,
                           self.generation == closeGeneration + 1,
                           self.panel == nil,
@@ -1650,7 +2061,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                     let escapeTask = Task<Void, Never> { try? await Task.sleep(nanoseconds: 30_000_000_000) }
                     self.convoTask = escapeTask
                     self.panel?.cancelOperation(nil)
-                    let escapeRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示上次窗口")?.isEnabled == true
+                    let escapeRestoreEnabled = gAppDelegate?.buildMenu().item(withTitle: "显示当前窗口")?.isEnabled == true
                     guard escapeTask.isCancelled,
                           self.generation == escapeGeneration + 1,
                           self.panel == nil,
@@ -2065,6 +2476,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
             onDelta: { [weak self] piece in guard let self = self, gen == self.generation else { return }; self.convoAppendDelta(piece) },
             onDone:  { [weak self] full  in guard let self = self, gen == self.generation else { return }; self.finishTurn(full) },
             onError: { [weak self] msg   in guard let self = self, gen == self.generation else { return }; self.convoError(msg) })
+        gAppDelegate?.refreshMenu()
     }
 
     // 逐字追加(流式途中纯文本,避免半截 markdown 错乱);长高交给定时器节流
@@ -2080,6 +2492,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func finishTurn(_ full: String) {
         convoTask = nil
         guard convoTextView != nil else { return }   // 会话已被关闭:忽略迟到的完成回调
+        conversationErrorMessage = nil
         let text = full.trimmingCharacters(in: .whitespacesAndNewlines)
         convo.append(ConversationTurn(role: "assistant", content: text))
         lastResult = text
@@ -2091,6 +2504,29 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         setInputEnabled(true, placeholder: "继续追问… (回车发送)")
         focusAskField()
         scrollTranscript(toLocation: convo.count <= 2 ? 0 : turnStartLoc)
+
+        if case .text(let selectedText)? = sessionContext,
+           let historyID = questionHistoryID {
+            let transcript = convo.compactMap { turn -> RecentResultTurn? in
+                switch turn.role {
+                case "user":
+                    return RecentResultTurn(role: .user, content: turn.content)
+                case "assistant":
+                    return RecentResultTurn(role: .assistant, content: turn.content)
+                default:
+                    return nil
+                }
+            }
+            let firstQuestion = convo.first(where: { $0.role == "user" })?.content ?? selectedText
+            recordRecentResult(.textQuestionCompleted(
+                id: historyID,
+                selectedText: recentContextSummary(selectedText),
+                transcript: transcript,
+                menuSummary: recentMenuSummary(firstQuestion),
+                completedAt: Date()
+            ))
+        }
+        gAppDelegate?.refreshMenu()
 
         if uiTestMode {
             let asst = convo.filter { $0.role == "assistant" }.count
@@ -2116,6 +2552,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func convoError(_ msg: String) {
         convoTask = nil
         guard convoTextView != nil else { return }   // 会话已被关闭:忽略迟到的错误回调
+        conversationErrorMessage = msg
         var failedPrompt = ""
         if convo.last?.role == "user" {
             failedPrompt = convo.removeLast().content
@@ -2136,6 +2573,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
         focusAskField()
         scrollTranscriptToBottom()
+        gAppDelegate?.refreshMenu()
     }
 
     // 回车或点击右侧 ↑ 按钮发送提问或追问
@@ -2172,6 +2610,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         if let errLoc = lastErrorLoc, errLoc <= storage.length {
             storage.deleteCharacters(in: NSRange(location: errLoc, length: storage.length - errLoc))
             lastErrorLoc = nil
+            conversationErrorMessage = nil
         }
         let isFirstTurn = convo.isEmpty
         if isFirstTurn {
@@ -2289,8 +2728,62 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         inputEnabledState = false
         contextHeaderEndLoc = 0
         lastErrorLoc = nil
+        conversationErrorMessage = nil
         assistantStart = 0
         assistantAccum = ""
+        questionHistoryID = nil
+    }
+
+    func runDemoRecentResults() {
+        uiTestMode = true
+        let contextFixture = "UITEST selected context"
+        let draftFixture = "UITEST unsent draft"
+        let historyID = "uitest-recent-translation"
+        let anchor = NSPoint(x: 180, y: 720)
+
+        showPromptComposer(context: .text(contextFixture), anchorTopLeft: anchor)
+        askField?.stringValue = draftFixture
+        updateSendButtonState()
+        recordRecentResult(.translationSucceeded(
+            id: historyID,
+            sourceText: "UITEST source",
+            resultText: "UITEST translated result",
+            menuSummary: "UITEST translation",
+            completedAt: Date(timeIntervalSince1970: 28_800)
+        ))
+
+        showRecentResult(id: historyID)
+        guard isVisible,
+              canShowCurrentWindow,
+              askField == nil,
+              recentResults.entry(id: historyID) != nil else {
+            fputs("FAIL: recent result did not open as a read-only window\n", stderr)
+            exit(1)
+        }
+
+        guard showCurrentWindow(),
+              askField?.stringValue == draftFixture,
+              sessionContext != nil else {
+            fputs("FAIL: current draft was not restored after history browsing\n", stderr)
+            exit(1)
+        }
+
+        showRecentResult(id: historyID)
+        clearRecentResults()
+        guard recentResults.entries.isEmpty,
+              !isVisible,
+              lastResult == nil,
+              body == nil,
+              canShowCurrentWindow else {
+            fputs("FAIL: clearing history did not close only the history window\n", stderr)
+            exit(1)
+        }
+
+        print("UITEST recent_results PASS")
+        logLine("UITEST recent_results PASS")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSApp.terminate(nil)
+        }
     }
 
     // 真实测量换行后文本的自然宽高(对富文本同样准确;宽度用于短内容收窄窗口)
@@ -2632,6 +3125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         //   GLINT_UITEST=hotkey_settings → 快捷键录制控件状态与布局自检
         //   GLINT_UITEST=pin_restore    → 图钉、隐藏与恢复自检
         //   GLINT_UITEST=text_command_panel → 文字命令面板自检
+        //   GLINT_UITEST=recent_results → 最近结果菜单、只读窗口与当前草稿恢复自检
         //   其它值 → 提问会话流程(走真实 API)
         if let mode = ProcessInfo.processInfo.environment["GLINT_UITEST"] {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -2653,6 +3147,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             NSApp.terminate(nil)
                         }
                     }
+                } else if mode == "recent_results" {
+                    self.popup.runDemoRecentResults()
                 } else if mode == "hotkey_settings" {
                     self.settings.show(tab: 0)
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -2907,10 +3403,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func buildMenu() -> NSMenu {
         let menu = NSMenu()
-        let restoreItem = NSMenuItem(title: "显示上次窗口", action: #selector(showLastWindow), keyEquivalent: "")
+        let restoreItem = NSMenuItem(title: "显示当前窗口", action: #selector(showCurrentWindow), keyEquivalent: "")
         restoreItem.target = self
-        restoreItem.isEnabled = popup.canRestore
+        restoreItem.isEnabled = popup.canShowCurrentWindow
         menu.addItem(restoreItem)
+
+        let recentItem = NSMenuItem(title: "最近结果", action: nil, keyEquivalent: "")
+        recentItem.submenu = buildRecentResultsMenu()
+        menu.addItem(recentItem)
         menu.addItem(NSMenuItem.separator())
         let settingsItem = NSMenuItem(title: "设置…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
@@ -2920,6 +3420,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quitItem.target = self
         menu.addItem(quitItem)
         return menu
+    }
+
+    private func buildRecentResultsMenu() -> NSMenu {
+        let submenu = NSMenu(title: "最近结果")
+        let model = RecentResultsMenuModel(
+            entries: popup.recentResultEntries,
+            historySwitchingEnabled: popup.historySwitchingEnabled
+        )
+        for itemModel in model.items {
+            switch itemModel.role {
+            case .history:
+                let item = NSMenuItem(
+                    title: itemModel.title,
+                    action: #selector(showRecentResultMenuItem(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = itemModel.id
+                item.isEnabled = itemModel.isEnabled
+                submenu.addItem(item)
+            case .separator:
+                submenu.addItem(NSMenuItem.separator())
+            case .emptyState:
+                let item = NSMenuItem(title: itemModel.title, action: nil, keyEquivalent: "")
+                item.isEnabled = false
+                submenu.addItem(item)
+            case .clear:
+                let item = NSMenuItem(
+                    title: itemModel.title,
+                    action: #selector(clearRecentResults),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.isEnabled = itemModel.isEnabled
+                submenu.addItem(item)
+            }
+        }
+        return submenu
     }
 
     // accessory App 不显示菜单栏,但有了 mainMenu 后 ⌘C/⌘V/⌘X/⌘A/撤销 的 key equivalent 才能在追问框生效
@@ -3016,7 +3554,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings() { settings.show() }
 
-    @objc func showLastWindow() { _ = popup.restoreLastWindow() }
+    @objc func showCurrentWindow() { _ = popup.showCurrentWindow() }
+
+    @objc func showRecentResultMenuItem(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else {
+            refreshMenu()
+            return
+        }
+        popup.showRecentResult(id: id)
+    }
+
+    @objc func clearRecentResults() {
+        popup.clearRecentResults()
+    }
 
     @objc func recheck() {
         logLine("manual recheck AX_TRUSTED=\(AXIsProcessTrusted())")

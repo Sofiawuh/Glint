@@ -37,6 +37,10 @@ harness run azure-services-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_W
 # 结果窗口图钉 / 隐藏 / 恢复
 harness run popup-lifecycle-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/popup_test" glint-app/PopupLifecycle.swift glint-app/popup_lifecycle_tests.swift && "$HARNESS_WORK_DIR/popup_test"'
 
+# 当前进程最近结果：内存上限、准入、菜单、隐私与只读浏览状态
+harness run recent-results-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/recent_results_test" glint-app/RecentResults.swift glint-app/recent_results_contract_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/recent_results_test"'
+harness run recent-results-app-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/recent_results_app_test" glint-app/RecentResults.swift glint-app/RecentResultsPresentation.swift glint-app/recent_results_app_contract_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/recent_results_app_test"'
+
 # 设置窗口录制与 Carbon 生命周期
 harness run hotkey-recording-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/hotkey_recording_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test"'
 harness run carbon-hotkey-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/carbon_hotkey_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/carbon_hotkey_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/carbon_hotkey_lifecycle_test"'
@@ -48,7 +52,7 @@ harness run carbon-hotkey-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$
 
 ```bash
 cd glint-app
-SRCS=(main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift)
+SRCS=(main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift RecentResults.swift RecentResultsPresentation.swift)
 swiftc "${SRCS[@]}" -target arm64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -typecheck
 swiftc "${SRCS[@]}" -target x86_64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -typecheck
 ```
@@ -75,11 +79,14 @@ open /Applications/Glint.app
 - **本地 UI 自测（不读取真实选区、不联网）**：
 
   ```bash
-  GLINT_UITEST=text_command_panel GLINT_UITEST_DIR=/tmp/glint-text-command-panel /Applications/Glint.app/Contents/MacOS/Glint
-  GLINT_UITEST=hotkey_settings GLINT_UITEST_DIR=/tmp/glint-hotkey-settings /Applications/Glint.app/Contents/MacOS/Glint
-  GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
-  GLINT_UITEST=pin_restore GLINT_UITEST_DIR=/tmp/glint-pin-restore /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-text-command-panel.XXXXXX)" GLINT_UITEST=text_command_panel GLINT_UITEST_DIR=/tmp/glint-text-command-panel /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-hotkey-settings.XXXXXX)" GLINT_UITEST=hotkey_settings GLINT_UITEST_DIR=/tmp/glint-hotkey-settings /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-translate.XXXXXX)" GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-pin-restore.XXXXXX)" GLINT_UITEST=pin_restore GLINT_UITEST_DIR=/tmp/glint-pin-restore /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-recent-results.XXXXXX)" GLINT_UITEST=recent_results GLINT_UITEST_DIR=/tmp/glint-recent-results /Applications/Glint.app/Contents/MacOS/Glint
   ```
+
+  `GLINT_CONFIG_DIR` 只用于显式测试隔离；未设置时生产环境仍使用 `~/.config/glint`。每次自测创建独立临时配置目录，避免读取或覆盖真实 Azure 配置。
 
 - **运行状态与日志核查**：
   - 签名：`codesign --verify --deep --strict --verbose=2 /Applications/Glint.app`
