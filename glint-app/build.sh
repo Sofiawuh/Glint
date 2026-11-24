@@ -22,7 +22,7 @@ else
 fi
 
 echo "==> 1/5 编译 universal 二进制 (arm64 + x86_64) 与生成品牌图标 (Glint.icns)"
-SRCS="main.swift Geometry.swift SelectionDetection.swift SelectionEntryLifecycle.swift SelectionEntryKeyboard.swift SelectionEntryStyle.swift AccessibilitySelectionReader.swift SelectionEntryController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift"
+SRCS="main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift"
 swiftc $SRCS -target arm64-apple-macos${MIN_OS}  -o /tmp/glint_arm64 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 swiftc $SRCS -target x86_64-apple-macos${MIN_OS} -o /tmp/glint_x86   -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -O $RUNTIME_COMPAT_FLAGS
 lipo -create -output /tmp/glint_uni /tmp/glint_arm64 /tmp/glint_x86
@@ -76,14 +76,14 @@ DMGDIR="$(mktemp -d)"
 cp -R "$APP" "$DMGDIR/"
 ln -s /Applications "$DMGDIR/Applications"
 cat > "$DMGDIR/安装说明.txt" <<'TXT'
-Glint 划词翻译 / 划词提问 / 截图提问 —— 安装 3 步
+Glint 文字翻译 / 文字提问 / 截图提问 —— 安装 3 步
 
 1) 把左边的 Glint.app 拖到右边的「Applications」文件夹里。
 2) 打开「应用程序」,右键点 Glint → 选「打开」→ 再点「打开」(只需这一次,绕过未知开发者拦截)。
    开起来后屏幕右上角菜单栏会出现 Glint 图标。
 3) 首次会弹「辅助功能」授权:
    系统设置 → 隐私与安全性 → 辅助功能 → 把 Glint 的开关打开。
-   (这是划词监听必需的权限,不开就不会冒泡。)
+   (这是跨应用读取所选文字和受保护复制降级所需的权限。)
 
 配置 Azure(图形界面,无需命令行):
    点菜单栏 Glint 图标 →「设置…」→「Azure」。
@@ -91,8 +91,8 @@ Glint 划词翻译 / 划词提问 / 截图提问 —— 安装 3 步
    两组配置都可以先点「测试连接」验证当前输入，再点「保存」。
 
 用法:
- - 划词:任意 App 里拖选、双击/三击、键盘扩选或全选文字 → 选区右下角出现赤陶色小方块 → 鼠标悬停后展开「翻译」「提问」:
-   点「翻译」直接出译文;点「提问」将划选内容作为上下文暂存,输入你的 Prompt 后发送。拖动滚动条或表格列宽不会触发入口。
+ - 文字命令:任意 App 里选中文字 → 按全局快捷键(默认 ⌃⌥T,可在「设置… → 基础」独立录制)→ 鼠标右下直接显示「翻译」「提问」:
+   点「翻译」直接出译文;点「提问」将选中文字作为上下文暂存,输入你的 Prompt 后发送。单纯拖选、滚动或调整窗口不会自动弹出入口。
  - 截图提问:按全局快捷键(默认 ⌃⌥E,可在「设置… → 基础」直接录制修改)→ 框选屏幕一块 → 将截图作为上下文暂存,输入你的 Prompt 后由多模态模型回答并支持继续追问。
    首次用要再授「屏幕录制」:系统设置 → 隐私与安全性 → 屏幕录制 → 打开 Glint(授完重开一次 App)。
 

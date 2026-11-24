@@ -2,66 +2,61 @@
 
 本手册规范 [glint-app/](../../glint-app) 的本地编译、签名校验、安装替换与自验收流程。
 
-## 1. 几何、Markdown 与 Azure 协议单测验收
+## 1. 单元与协议测试
 
 通过 `harness run` 在隔离沙盒中编译并执行测试：
 
 ```bash
-# 几何定位测试
-harness run geometry-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/geo_test" glint-app/Geometry.swift glint-app/geometry_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/geo_test"'
+# 文字命令快捷键、配置迁移、冲突与切换事务
+harness run text-command-hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/text_command_hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/text_command_hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/text_command_hotkey_test"'
 
-# 文本选区证据与控件拖动过滤
-harness run selection-detection-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_detection_test" glint-app/SelectionDetection.swift glint-app/selection_detection_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_detection_test"'
+# AX 优先、受保护复制过滤与剪贴板事务
+harness run selected-text-extractor-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selected_text_extractor_test" glint-app/SelectedTextExtractor.swift glint-app/selected_text_extractor_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/selected_text_extractor_test"'
 
-# 跨应用候选排序、未知角色拖选/双击降级和文件/图片剪贴板过滤
-harness run selection-compatibility-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_compatibility_test" glint-app/SelectionDetection.swift glint-app/selection_compatibility_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_compatibility_test"'
+# 鼠标附近布局、请求代际、双按钮动作与关闭行为
+harness run text-command-panel-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/text_command_panel_test" glint-app/TextCommandPanelLifecycle.swift glint-app/Geometry.swift glint-app/text_command_panel_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/text_command_panel_test"'
 
-# 旧 AX 选区不得因拖动或双击重新进入复制降级
-harness run selection-clipboard-fallback-regression-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_clipboard_fallback_regression_test" glint-app/SelectionDetection.swift glint-app/selection_clipboard_fallback_regression_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_clipboard_fallback_regression_test"'
+# 显式入口路由：选区手势保持静默，只有文字快捷键开始取词
+harness run text-command-entry-contract-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/text_command_entry_contract_test" glint-app/ScreenshotHotKey.swift glint-app/TextCommandEntryPolicy.swift glint-app/text_command_entry_contract_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/text_command_entry_contract_test"'
 
-# 剪贴板恢复只能覆盖本事务自己的复制代次
-harness run clipboard-restoration-generation-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/clipboard_restoration_generation_test" glint-app/SelectionDetection.swift glint-app/clipboard_restoration_generation_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/clipboard_restoration_generation_test"'
+# 内容浮窗与截图坐标几何
+harness run geometry-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/geometry_test" glint-app/Geometry.swift glint-app/geometry_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/geometry_test"'
 
-# clipboard-only 入口失效后允许重新选择同应用同文本
-harness run selection-clipboard-dedup-invalidation-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_clipboard_dedup_invalidation_test" glint-app/SelectionDetection.swift glint-app/selection_clipboard_dedup_invalidation_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_clipboard_dedup_invalidation_test"'
+# Markdown 渲染
+harness run markdown-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/markdown_test" glint-app/Markdown.swift glint-app/markdown_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/markdown_test"'
 
-# 微型入口悬停、展开、收回和代际令牌状态机
-harness run selection-entry-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_entry_lifecycle_test" glint-app/SelectionDetection.swift glint-app/SelectionEntryLifecycle.swift glint-app/selection_entry_lifecycle_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_entry_lifecycle_test"'
+# Azure Translator / Azure OpenAI v1 协议
+harness run azure-services-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/azure_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/azure_services_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/azure_test"'
 
-# 10×10 pt 赤陶色方块、22×22 pt 命中区、描边与阴影样式契约
-harness run selection-entry-style-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/selection_entry_style_test" glint-app/SelectionEntryStyle.swift glint-app/selection_entry_style_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/selection_entry_style_test"'
-
-# 内部模拟复制、Escape 与普通用户按键复验策略
-harness run selection-entry-keyboard-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/selection_entry_keyboard_test" glint-app/SelectionDetection.swift glint-app/SelectionEntryLifecycle.swift glint-app/SelectionEntryKeyboard.swift glint-app/selection_entry_keyboard_tests.swift -framework Foundation -framework CoreGraphics && "$HARNESS_WORK_DIR/selection_entry_keyboard_test"'
-
-# Markdown 渲染测试
-harness run markdown-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/md_test" glint-app/Markdown.swift glint-app/markdown_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/md_test"'
-
-# Azure Translator / Azure OpenAI v1 适配测试
-harness run azure-services-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/azure_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/azure_services_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/azure_test"'
-
-# 结果窗口图钉 / 隐藏 / 恢复生命周期测试
+# 结果窗口图钉 / 隐藏 / 恢复
 harness run popup-lifecycle-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/popup_test" glint-app/PopupLifecycle.swift glint-app/popup_lifecycle_tests.swift && "$HARNESS_WORK_DIR/popup_test"'
 
-# 截图快捷键值、迁移与切换事务
-harness run hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_test"'
+# 截图快捷键既有契约
+harness run hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_test"'
 
-# 设置窗口录制生命周期
+# 设置窗口录制与 Carbon 生命周期
 harness run hotkey-recording-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/hotkey_recording_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test"'
-
-# Carbon 注册与注销生命周期（使用本地可注入边界，不注册真实系统快捷键）
 harness run carbon-hotkey-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/carbon_hotkey_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/carbon_hotkey_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/carbon_hotkey_lifecycle_test"'
 ```
 
-## 2. 应用打包与安装替换
+若当前机器没有 `harness`，使用 `perl alarm` 或等价进程超时包装逐条执行，并在交付记录中如实说明。
+
+## 2. 双架构类型检查
+
+```bash
+cd glint-app
+SRCS=(main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift)
+swiftc "${SRCS[@]}" -target arm64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -typecheck
+swiftc "${SRCS[@]}" -target x86_64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -typecheck
+```
+
+## 3. 应用打包与安装替换
 
 每次修改 [glint-app/](../../glint-app) 下的 Swift 源码后，必须按顺序执行：
 
 ```bash
-# 1. 编译 Universal 二进制并打包 Glint.app 与 Glint.dmg
 cd glint-app && bash build.sh 'Glint Self Signed'
 
-# 2. 停止运行中的进程，将旧安装移动到临时备份目录，再替换并重启
 pkill -x Glint || true
 GLINT_BACKUP_DIR="$(mktemp -d /tmp/glint-install-backup.XXXXXX)"
 if [ -d /Applications/Glint.app ]; then
@@ -72,16 +67,21 @@ codesign --verify --deep --strict --verbose=2 /Applications/Glint.app
 open /Applications/Glint.app
 ```
 
-## 3. UI 渲染与进程自验收
+## 4. UI 与进程验收
 
-- **本地 UI 自测（无需联网）**：
+- **本地 UI 自测（不读取真实选区、不联网）**：
+
   ```bash
-  GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_UITEST=text_command_panel GLINT_UITEST_DIR=/tmp/glint-text-command-panel /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_UITEST=hotkey_settings GLINT_UITEST_DIR=/tmp/glint-hotkey-settings /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_UITEST=pin_restore GLINT_UITEST_DIR=/tmp/glint-pin-restore /Applications/Glint.app/Contents/MacOS/Glint
-  GLINT_UITEST=selection_entry GLINT_UITEST_DIR=/tmp/glint-selection-entry /Applications/Glint.app/Contents/MacOS/Glint
   ```
+
 - **运行状态与日志核查**：
-  - 检查进程存活：`pgrep -fl /Applications/Glint.app/Contents/MacOS/Glint`
-  - 检查运行日志：`tail -n 50 ~/.config/glint/glint.log`
-- **跨应用选区矩阵**：使用自行构造的非敏感测试文字，分别验证 Safari、Chrome、微信、企业微信、VS Code 和 TextEdit 的拖选与双击；同时验证网页/编辑器滚动条、消息列表滚动、Finder 桌面文件/图标与桌面拖框均不显示入口。日志只核对 `path`、`role`、`range`、`bounds` 等布尔信息，不得记录选中文字或剪贴板正文。
+  - 签名：`codesign --verify --deep --strict --verbose=2 /Applications/Glint.app`
+  - 架构：`lipo -archs /Applications/Glint.app/Contents/MacOS/Glint`
+  - 进程：`pgrep -fl /Applications/Glint.app/Contents/MacOS/Glint`
+  - 日志：`tail -n 50 ~/.config/glint/glint.log`
+
+- **跨应用矩阵**：使用自行构造的非敏感测试文字，在 Safari、Chrome、微信、企业微信、VS Code 和 TextEdit 中验证“选中文字 → 按文字快捷键 → 显示双按钮”；再验证普通拖选、双击、滚动条、消息列表滚动、Finder 文件/图标与桌面拖框均不会自动显示入口。日志只能核对来源类型和状态，不得记录选中文字或剪贴板正文。

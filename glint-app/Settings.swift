@@ -99,6 +99,12 @@ final class SettingsController: NSObject, NSWindowDelegate {
         beginRouting: { handler in gAppDelegate?.beginScreenshotHotKeyRecording(handler) },
         endRouting: { gAppDelegate?.endScreenshotHotKeyRecording() }
     )
+    private let textCommandHotKeyRecorder = HotKeyRecorderControl()
+    private let textCommandHotKeyStatusLabel = NSTextField(labelWithString: "")
+    private lazy var textCommandHotKeyRecordingCoordinator = TextCommandHotKeyRecordingCoordinator(
+        beginRouting: { handler in gAppDelegate?.beginTextCommandHotKeyRecording(handler) },
+        endRouting: { gAppDelegate?.endTextCommandHotKeyRecording() }
+    )
 
     private let axStatusLabel = NSTextField(labelWithString: "")
     private let scrStatusLabel = NSTextField(labelWithString: "")
@@ -169,6 +175,8 @@ final class SettingsController: NSObject, NSWindowDelegate {
         if index != 0 {
             hotKeyRecorder.cancelRecording()
             hotKeyRecordingCoordinator.settingsDidSelectBasicTab(false)
+            textCommandHotKeyRecorder.cancelRecording()
+            textCommandHotKeyRecordingCoordinator.settingsDidSelectBasicTab(false)
         }
         currentTabIndex = index
         for (i, button) in tabButtons.enumerated() { button.isSelected = i == index }
@@ -245,9 +253,12 @@ final class SettingsController: NSObject, NSWindowDelegate {
         launchAtLoginCheck.action = #selector(onLaunchAtLoginToggled)
         launchAtLoginCheck.font = .systemFont(ofSize: 13)
 
+        hotKeyRecorder.setPurposeLabel("截图快捷键")
         hotKeyRecorder.onRecordingStateChanged = { [weak self] isRecording in
             guard let self else { return }
             if isRecording {
+                self.textCommandHotKeyRecorder.cancelRecording()
+                self.textCommandHotKeyRecordingCoordinator.endRecording()
                 self.hotKeyStatusLabel.textColor = .secondaryLabelColor
                 self.hotKeyStatusLabel.stringValue = "按下组合键；Esc 取消，Delete 恢复默认"
                 self.hotKeyRecordingCoordinator.beginRecording { [weak self] hotKey in
@@ -267,7 +278,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         hotKeyStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         hotKeyStatusLabel.widthAnchor.constraint(equalToConstant: 300).isActive = true
 
-        let hotKeyDescription = NSTextField(labelWithString: "框选截图；默认 ⌃⌥E")
+        let hotKeyDescription = NSTextField(labelWithString: "默认 ⌃⌥E")
         hotKeyDescription.font = .systemFont(ofSize: 12)
         hotKeyDescription.textColor = .secondaryLabelColor
         let hotKeyControls = NSStackView(views: [hotKeyRecorder, hotKeyDescription])
@@ -279,6 +290,43 @@ final class SettingsController: NSObject, NSWindowDelegate {
         hotKeyStack.spacing = 5
         hotKeyStack.alignment = .leading
 
+        textCommandHotKeyRecorder.setPurposeLabel("文字命令快捷键")
+        textCommandHotKeyRecorder.onRecordingStateChanged = { [weak self] isRecording in
+            guard let self else { return }
+            if isRecording {
+                self.hotKeyRecorder.cancelRecording()
+                self.hotKeyRecordingCoordinator.endRecording()
+                self.textCommandHotKeyStatusLabel.textColor = .secondaryLabelColor
+                self.textCommandHotKeyStatusLabel.stringValue = "按下组合键；Esc 取消，Delete 恢复默认"
+                self.textCommandHotKeyRecordingCoordinator.beginRecording { [weak self] hotKey in
+                    self?.textCommandHotKeyRecorder.receiveCurrentHotKey(hotKey.screenshotHotKey)
+                }
+            } else {
+                self.textCommandHotKeyRecordingCoordinator.endRecording()
+            }
+        }
+        textCommandHotKeyRecorder.onDecision = { [weak self] decision in
+            self?.handleTextCommandHotKeyRecordingDecision(decision)
+        }
+
+        textCommandHotKeyStatusLabel.font = .systemFont(ofSize: 11)
+        textCommandHotKeyStatusLabel.textColor = .secondaryLabelColor
+        textCommandHotKeyStatusLabel.lineBreakMode = .byTruncatingTail
+        textCommandHotKeyStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        textCommandHotKeyStatusLabel.widthAnchor.constraint(equalToConstant: 300).isActive = true
+
+        let textCommandDescription = NSTextField(labelWithString: "选中文字后显示翻译 / 提问；默认 ⌃⌥T")
+        textCommandDescription.font = .systemFont(ofSize: 12)
+        textCommandDescription.textColor = .secondaryLabelColor
+        let textCommandControls = NSStackView(views: [textCommandHotKeyRecorder, textCommandDescription])
+        textCommandControls.orientation = .horizontal
+        textCommandControls.spacing = 10
+        textCommandControls.alignment = .centerY
+        let textCommandHotKeyStack = NSStackView(views: [textCommandControls, textCommandHotKeyStatusLabel])
+        textCommandHotKeyStack.orientation = .vertical
+        textCommandHotKeyStack.spacing = 5
+        textCommandHotKeyStack.alignment = .leading
+
         azureSummaryLabel.font = .systemFont(ofSize: 13, weight: .medium)
         let configure = NSButton(title: "配置 Azure…", target: self, action: #selector(onGoToAzureTab))
         configure.bezelStyle = .rounded
@@ -289,7 +337,8 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
         return pageStack([
             prefRow(label: "启动", content: launchAtLoginCheck),
-            prefRow(label: "快捷键", content: hotKeyStack, alignTop: true),
+            prefRow(label: "文字命令", content: textCommandHotKeyStack, alignTop: true),
+            prefRow(label: "截图", content: hotKeyStack, alignTop: true),
             prefRow(label: "Azure", content: azureRow)
         ], top: 34)
     }
@@ -408,11 +457,20 @@ final class SettingsController: NSObject, NSWindowDelegate {
     private func loadFields() {
         let config = AppConfig.shared
         hotKeyRecorder.setHotKey(gAppDelegate?.currentScreenshotHotKey ?? config.screenshotHotKey)
+        textCommandHotKeyRecorder.setHotKey(
+            (gAppDelegate?.currentTextCommandHotKey ?? config.textCommandHotKey).screenshotHotKey
+        )
         if let message = gAppDelegate?.screenshotHotKeyStartupMessage {
             hotKeyStatusLabel.textColor = .systemOrange
             hotKeyStatusLabel.stringValue = message
         } else {
             hotKeyStatusLabel.stringValue = ""
+        }
+        if let message = gAppDelegate?.textCommandHotKeyStartupMessage {
+            textCommandHotKeyStatusLabel.textColor = .systemOrange
+            textCommandHotKeyStatusLabel.stringValue = message
+        } else {
+            textCommandHotKeyStatusLabel.stringValue = ""
         }
         translatorEndpointField.stringValue = config.translator.endpoint
         translatorKeyField.stringValue = config.translator.apiKey
@@ -584,6 +642,9 @@ final class SettingsController: NSObject, NSWindowDelegate {
         case .invalid:
             hotKeyStatusLabel.textColor = .systemRed
             hotKeyStatusLabel.stringValue = "该组合键不可用"
+        case .conflictsWithOtherAction:
+            hotKeyStatusLabel.textColor = .systemRed
+            hotKeyStatusLabel.stringValue = "不能与文字命令快捷键相同"
         case .registrationFailed:
             hotKeyStatusLabel.textColor = .systemRed
             hotKeyStatusLabel.stringValue = "无法注册，可能已被系统或其他应用占用"
@@ -603,14 +664,82 @@ final class SettingsController: NSObject, NSWindowDelegate {
         }
     }
 
+    private func handleTextCommandHotKeyRecordingDecision(
+        _ decision: ScreenshotHotKey.RecordingDecision
+    ) {
+        switch decision {
+        case .waitForKey:
+            return
+        case .invalid:
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = "请同时按下修饰键和一个按键"
+        case .cancel:
+            textCommandHotKeyRecorder.cancelRecording()
+            textCommandHotKeyStatusLabel.stringValue = ""
+        case .restoreDefault:
+            applyTextCommandHotKey(.default)
+        case .commit(let hotKey):
+            applyTextCommandHotKey(TextCommandHotKey(
+                keyCode: hotKey.keyCode,
+                modifiers: hotKey.modifiers
+            ))
+        }
+    }
+
+    private func applyTextCommandHotKey(_ hotKey: TextCommandHotKey) {
+        guard let delegate = gAppDelegate else {
+            textCommandHotKeyRecorder.cancelRecording()
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = "Glint 尚未完成启动，请稍后重试"
+            return
+        }
+        let result = delegate.applyTextCommandHotKey(hotKey)
+        let effective = delegate.currentTextCommandHotKey
+        textCommandHotKeyRecorder.finishRecording(with: effective.screenshotHotKey)
+        switch result {
+        case .applied:
+            textCommandHotKeyStatusLabel.textColor = .systemGreen
+            textCommandHotKeyStatusLabel.stringValue = "✓ 已生效并保存"
+        case .unchanged:
+            textCommandHotKeyStatusLabel.textColor = .secondaryLabelColor
+            textCommandHotKeyStatusLabel.stringValue = "快捷键未更改"
+        case .invalid:
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = "该组合键不可用"
+        case .conflictsWithScreenshot:
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = "不能与截图快捷键相同"
+        case .registrationFailed:
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = "无法注册，可能已被系统或其他应用占用"
+        case .persistenceFailed(let candidateCleanupFailed):
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = candidateCleanupFailed
+                ? "保存失败，请重新启动 Glint 后再试"
+                : "快捷键未保存，原快捷键仍然有效"
+        case .oldRegistrationInvalidationFailed(let rollbackFailed, let cleanupFailed):
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = (rollbackFailed || cleanupFailed)
+                ? "切换未完成，原快捷键仍有效；请重新启动 Glint"
+                : "无法停用原快捷键，本次修改已撤销"
+        case .modificationLocked:
+            textCommandHotKeyStatusLabel.textColor = .systemRed
+            textCommandHotKeyStatusLabel.stringValue = "快捷键修改已锁定，请重新启动 Glint 后再试"
+        }
+    }
+
     func windowDidBecomeKey(_ notification: Notification) { refreshPermissions() }
     func windowDidResignKey(_ notification: Notification) {
         hotKeyRecorder.cancelRecording()
         hotKeyRecordingCoordinator.settingsWindowDidResignKey()
+        textCommandHotKeyRecorder.cancelRecording()
+        textCommandHotKeyRecordingCoordinator.settingsWindowDidResignKey()
     }
     func windowWillClose(_ notification: Notification) {
         hotKeyRecorder.cancelRecording()
         hotKeyRecordingCoordinator.settingsWindowWillClose()
+        textCommandHotKeyRecorder.cancelRecording()
+        textCommandHotKeyRecordingCoordinator.settingsWindowWillClose()
         translatorProbeGeneration += 1
         gptProbeGeneration += 1
         translatorProbeButton.isEnabled = true

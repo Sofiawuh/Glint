@@ -281,6 +281,7 @@ enum ScreenshotHotKeyApplyResult: Equatable {
     case applied
     case unchanged
     case invalid
+    case conflictsWithOtherAction
     case registrationFailed
     case persistenceFailed(candidateCleanupFailed: Bool)
     case oldRegistrationInvalidationFailed(configRollbackFailed: Bool, candidateCleanupFailed: Bool)
@@ -291,6 +292,7 @@ final class ScreenshotHotKeyManager {
     private let registrar: any HotKeyRegistering
     private let persist: (ScreenshotHotKey) -> Bool
     private let onScreenshot: () -> Void
+    private let reservedHotKeyProvider: () -> ScreenshotHotKey?
     private var nextID: UInt32 = 1
     private var currentRegistration: (any HotKeyRegistration)?
     private var pendingCandidateRegistration: (any HotKeyRegistration)?
@@ -313,10 +315,12 @@ final class ScreenshotHotKeyManager {
         savedHotKey: ScreenshotHotKey,
         registrar: any HotKeyRegistering,
         persist: @escaping (ScreenshotHotKey) -> Bool,
+        reservedHotKeyProvider: @escaping () -> ScreenshotHotKey? = { nil },
         onScreenshot: @escaping () -> Void
     ) {
         self.registrar = registrar
         self.persist = persist
+        self.reservedHotKeyProvider = reservedHotKeyProvider
         self.onScreenshot = onScreenshot
         let initialHotKey = savedHotKey.isValid ? savedHotKey : .default
         self.effectiveHotKey = initialHotKey
@@ -352,6 +356,9 @@ final class ScreenshotHotKeyManager {
     func apply(_ candidate: ScreenshotHotKey) -> ScreenshotHotKeyApplyResult {
         guard !isModificationLocked else { return .modificationLocked }
         guard candidate.isValid else { return .invalid }
+        if candidate == reservedHotKeyProvider() {
+            return .conflictsWithOtherAction
+        }
         if candidate == effectiveHotKey, currentRegistration != nil {
             return .unchanged
         }
