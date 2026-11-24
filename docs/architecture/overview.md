@@ -17,6 +17,8 @@ flowchart LR
     AppCore --> Geo["几何定位\nGeometry.swift"]
     AppCore --> PopupState["内容窗生命周期\nPopupLifecycle.swift"]
     AppCore --> RecentResults["进程内最近结果\nRecentResults.swift\nRecentResultsPresentation.swift"]
+    AppCore --> TranslationDomain["翻译领域层\nTranslationFormatting.swift\nTranslationDocument.swift\nTranslationWorkbench.swift"]
+    TranslationDomain --> TranslationUI["双编辑工作台与富文本复制\nTranslationWorkspaceView.swift\nTranslationClipboard.swift"]
     AppCore --> Markdown["Markdown 渲染\nMarkdown.swift"]
     AppCore --> Settings["基础 / 权限 / Azure 设置\nSettings.swift"]
     TextHotKey --> HotKeyDomain["双快捷键注册与切换事务\nTextCommandHotKey.swift / HotKey.swift"]
@@ -24,8 +26,10 @@ flowchart LR
     Settings --> Config["本机配置\nConfig.swift"]
     Config --> Translator["Azure Text Translation"]
     Config --> GPT["Azure OpenAI v1"]
+    Config --> Speech["Azure Speech"]
     AppCore --> Translator
     AppCore --> GPT
+    AppCore --> Speech
 ```
 
 - **文字命令入口**（[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[TextCommandEntryPolicy.swift](../../glint-app/TextCommandEntryPolicy.swift)）：用户选中文字后主动按快捷键才开始取词；鼠标释放、拖选、双击、键盘扩选、`⌘A` 与 `mouseMoved` 不会自动显示入口或触发复制。
@@ -34,8 +38,10 @@ flowchart LR
 - **双快捷键事务**（[ScreenshotHotKey.swift](../../glint-app/ScreenshotHotKey.swift)、[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[HotKey.swift](../../glint-app/HotKey.swift)）：截图和文字命令拥有独立配置与 Carbon 注册；`` ` `` 与 `F1–F20` 可以零修饰键注册，其他键必须包含 Control、Option、Shift 或 Command。候选先以非激活状态注册，只有持久化成功且旧注册安全注销后才切换；两套快捷键不得相同。
 - **主控与会话浮窗**（[main.swift](../../glint-app/main.swift)）：连接快捷键、按需取词、命令面板、翻译、流式对话与截图流程。全局事件 Tap 只处理命令面板外部点击、Escape 与自愈，不观察选区手势。
 - **最近结果**（[RecentResults.swift](../../glint-app/RecentResults.swift)、[RecentResultsPresentation.swift](../../glint-app/RecentResultsPresentation.swift)）：只在成功文字翻译或完整文字问答结束后写入纯文本快照；最多 10 条且总量不超过 10 MB。同一问答会话更新原条目，截图、草稿、错误和未完成流不进入历史。菜单按 ID 路由到唯一只读内容窗，不触发 Azure 请求。
+- **智能翻译工作台**（[TranslationFormatting.swift](../../glint-app/TranslationFormatting.swift)、[TranslationDocument.swift](../../glint-app/TranslationDocument.swift)、[TranslationService.swift](../../glint-app/TranslationService.swift)、[TranslationWorkbench.swift](../../glint-app/TranslationWorkbench.swift)、[TranslationWorkspaceView.swift](../../glint-app/TranslationWorkspaceView.swift)）：智能模式合并视觉硬换行并保护标题、邮件头、列表、引用、代码和简单表格；文档按稳定 ID 拆片、预算分批并原位重组。原文和译文均可编辑，重新翻译使用当前原文，请求代际阻止晚到响应覆盖新内容。
+- **复制与朗读**（[TranslationClipboard.swift](../../glint-app/TranslationClipboard.swift)、[Config.swift](../../glint-app/Config.swift)）：原文、译文和复制全部都从当前编辑框生成纯文本与 RTF；Speech 通过 SSML 调用 Azure Neural Voice，原文 / 译文互斥播放，再点当前按钮停止，音频不落盘。
 - **几何定位**（[Geometry.swift](../../glint-app/Geometry.swift)）：负责鼠标附近命令面板、内容浮窗边界夹紧以及多显示器截图坐标转换，不读取 AX 选区 bounds。
-- **Azure 配置与协议**（[Config.swift](../../glint-app/Config.swift)、[Settings.swift](../../glint-app/Settings.swift)）：持久化 Azure Translator、Azure OpenAI v1、截图快捷键与文字命令快捷键；设置页提供两套快捷键独立录制和两组 Azure 真实连接探测。
+- **Azure 配置与协议**（[Config.swift](../../glint-app/Config.swift)、[Settings.swift](../../glint-app/Settings.swift)）：持久化 Azure Translator、Azure OpenAI v1、Azure Speech、翻译目标与排版偏好、截图快捷键及文字命令快捷键；设置页提供两套快捷键独立录制和三组 Azure 真实连接探测。
 - **构建与打包**（[build.sh](../../glint-app/build.sh)）：生成 `arm64 + x86_64` Universal Binary、固定签名的 `Glint.app` 与 `Glint.dmg`。
 
 ## 2. 核心执行链路与数据流
@@ -49,6 +55,7 @@ sequenceDiagram
     participant Popup as PopupController
     participant Translator as Azure Translator
     participant GPT as Azure OpenAI v1
+    participant Speech as Azure Speech
     participant History as RecentResultStore
 
     User->>User: 在任意应用中选中文字
@@ -64,9 +71,15 @@ sequenceDiagram
         Panel-->>User: 鼠标右下直接显示“翻译｜提问”
         alt 点击翻译
             Panel->>Popup: 提交文本并关闭命令面板
-            Popup->>Translator: 发起翻译
-            Translator-->>Popup: 返回译文
-            Popup->>History: 成功后写入翻译快照
+            Popup->>Popup: 智能排版并按结构拆片
+            Popup->>Translator: 分批翻译可翻译片段
+            Translator-->>Popup: 返回译文与检测语言
+            Popup->>Popup: 稳定 ID 原位重组并打开双编辑区
+            Popup->>History: 成功后写入或更新同 ID 翻译快照
+            opt 用户朗读原文或译文
+                Popup->>Speech: 发送当前编辑内容的 SSML
+                Speech-->>Popup: 返回内存音频并播放
+            end
         else 点击提问
             Panel->>Popup: 暂存文本上下文并显示提问卡片
             User->>Popup: 输入非空 Prompt
@@ -94,5 +107,6 @@ sequenceDiagram
 - **非激活约束**：命令面板不得调用 `NSApp.activate` 或 `makeKeyAndOrderFront`；整个可见按钮区域可点击，主动作不依赖 hover。
 - **双快捷键约束**：截图与文字命令快捷键不能相同；只有 `` ` `` 与 `F1–F20` 允许不带修饰键；注册、持久化或旧注册注销失败时，旧有效快捷键继续工作。
 - **隐私约束**：Azure Key 仅保存在本机配置；日志不得记录凭据、真实选中文字、剪贴板正文或聊天正文。
-- **会话约束**：选中文字与截图上下文仅保存在当前进程内存中；Azure Translator 只处理翻译，Azure OpenAI v1 只处理提问、追问和截图理解。
+- **会话约束**：选中文字与截图上下文仅保存在当前进程内存中；Azure Translator 只处理翻译，Azure OpenAI v1 只处理提问、追问和截图理解，Azure Speech 只处理用户主动点击朗读时的当前编辑内容。
+- **排版约束**：智能排版只能调整结构与硬换行，不得使用 GPT 重写，不得改写词义、数字、金额、日期、URL、邮箱、路径、变量名或代码；严格模式只规范换行编码和尾随空格。
 - **历史约束**：最近结果只存在于当前进程内存，不序列化；只保存文字结果的纯文本快照，不保存 AppKit 视图、截图、Base64、Timer、网络任务或 Azure messages。浏览历史时只有一个内容窗，当前空闲草稿可切回恢复。

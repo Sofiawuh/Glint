@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import AVFoundation
 import Carbon.HIToolbox
 import os.log
 
@@ -947,7 +948,7 @@ final class PreviewSnippetTextView: NSTextView {
     override var mouseDownCanMoveWindow: Bool { true }
 }
 
-final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AVAudioPlayerDelegate {
     private enum SessionContext {
         case text(String)
         case image(NSImage, dataURL: String)
@@ -967,7 +968,14 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private enum SuspendedCurrentWindow {
         case translation(
-            resultText: String,
+            historyID: String,
+            sourceText: String,
+            translatedText: String,
+            sourceLanguage: String,
+            targetLanguage: String,
+            targetMode: TranslationTargetMode,
+            fixedTargetLanguage: String,
+            formattingMode: TranslationFormattingMode,
             frame: NSRect,
             isPinned: Bool
         )
@@ -1013,6 +1021,12 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private var askField: FocusAwareTextField?                   // 底部提问/追问输入框
     private var convoTask: Task<Void, Never>?
     private var translationRequestInFlight = false
+    private var translationWorkbench: TranslationWorkbenchState?
+    private weak var translationWorkspaceView: TranslationWorkspaceView?
+    private var translationTask: Task<Void, Never>?
+    private var speechTask: URLSessionDataTask?
+    private var speechPlayer: AVAudioPlayer?
+    private var speechGeneration = 0
     private var questionHistoryID: String?
     private var recentResults = RecentResultStore()
     private var displayMode: DisplayMode = .current
@@ -1063,9 +1077,12 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         lockFrameAfterRestore = false
         generation += 1
         translationRequestInFlight = false
+        stopTranslationWork()
         stopConversation()
         panel = nil; body = nil; pendingText = nil; pinButton = nil
         lastResult = nil; copyButton = nil
+        translationWorkbench = nil
+        translationWorkspaceView = nil
         if wasHistory {
             displayMode = .current
         } else {
@@ -1138,8 +1155,23 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         replaceVisiblePanelForModeSwitch()
         displayMode = .history(entry.id)
         switch entry.snapshot {
-        case .translation(_, let resultText):
-            showMessage(resultText, isError: false, showCopy: true, markdown: true)
+        case .translation(let sourceText, let resultText):
+            let preferences = AppConfig.shared.translationPreferences
+            let state = TranslationWorkbenchState(
+                historyID: entry.id,
+                sourceText: sourceText,
+                translatedText: resultText,
+                sourceLanguage: "auto",
+                targetLanguage: preferences.targetLanguage(for: sourceText),
+                targetMode: preferences.targetMode,
+                fixedTargetLanguage: preferences.fixedTargetLanguage,
+                formattingMode: preferences.formattingMode
+            )
+            showTranslationWorkspace(
+                state: state,
+                anchorTopLeft: NSEvent.mouseLocation,
+                readOnly: true
+            )
         case .question(let selectedText, let transcript):
             showReadOnlyQuestionHistory(
                 selectedText: selectedText,
@@ -1196,9 +1228,16 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
                 questionHistoryID: questionHistoryID
             )
         }
-        if let resultText = lastResult, !resultText.isEmpty {
+        if let state = translationWorkbench {
             return .translation(
-                resultText: resultText,
+                historyID: state.historyID,
+                sourceText: translationWorkspaceView?.sourceText ?? state.sourceText,
+                translatedText: translationWorkspaceView?.translatedText ?? state.translatedText,
+                sourceLanguage: state.sourceLanguage,
+                targetLanguage: translationWorkspaceView?.targetLanguage ?? state.targetLanguage,
+                targetMode: state.targetMode,
+                fixedTargetLanguage: state.fixedTargetLanguage,
+                formattingMode: translationWorkspaceView?.formattingMode ?? state.formattingMode,
                 frame: currentFrame,
                 isPinned: lifecycle.isPinned
             )
@@ -1209,6 +1248,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
     private func replaceVisiblePanelForModeSwitch() {
         generation += 1
         translationRequestInFlight = false
+        stopTranslationWork()
         stopConversation()
         growTimer?.invalidate()
         growTimer = nil
@@ -1219,6 +1259,8 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         lastResult = nil
         copyButton = nil
         pinButton = nil
+        translationWorkbench = nil
+        translationWorkspaceView = nil
         frameAnimations = 0
         hiddenFrame = nil
         lockFrameAfterRestore = false
@@ -1229,15 +1271,31 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     private func restoreCurrentWindow(_ snapshot: SuspendedCurrentWindow) {
         switch snapshot {
-        case .translation(let resultText, let frame, let wasPinned):
+        case .translation(
+            let historyID,
+            let sourceText,
+            let translatedText,
+            let sourceLanguage,
+            let targetLanguage,
+            let targetMode,
+            let fixedTargetLanguage,
+            let formattingMode,
+            let frame,
+            let wasPinned
+        ):
             let anchor = NSPoint(x: frame.minX, y: frame.maxY)
-            showMessage(
-                resultText,
-                isError: false,
-                showCopy: true,
-                markdown: true,
-                anchorTopLeft: anchor
+            let state = TranslationWorkbenchState(
+                historyID: historyID,
+                sourceText: sourceText,
+                translatedText: translatedText,
+                sourceLanguage: sourceLanguage,
+                targetLanguage: targetLanguage,
+                targetMode: targetMode,
+                fixedTargetLanguage: fixedTargetLanguage,
+                formattingMode: formattingMode
             )
+            translationWorkbench = state
+            showTranslationWorkspace(state: state, anchorTopLeft: anchor, readOnly: false)
             applyRestoredFrame(frame)
             restorePinIfNeeded(wasPinned)
 
@@ -1471,7 +1529,10 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         suspendedCurrentWindow = nil
         translationRequestInFlight = false
         generation += 1
+        stopTranslationWork()
         stopConversation()
+        translationWorkbench = nil
+        translationWorkspaceView = nil
         if let old = panel {
             old.orderOut(nil)
             panel = nil
@@ -1582,28 +1643,290 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
 
     func beginSelectionTranslation(text: String, anchorTopLeft: NSPoint) {
         prepareForSelectionAction(text: text)
-        generation += 1   // 作废上一次在途回调(与解释/截图一致)
-        let gen = generation
+        let preferences = AppConfig.shared.translationPreferences
+        let formattedSource = SmartTranslationFormatter.format(text, mode: preferences.formattingMode)
+        let state = TranslationWorkbenchState(
+            historyID: UUID().uuidString,
+            sourceText: formattedSource,
+            translatedText: "",
+            sourceLanguage: "auto",
+            targetLanguage: preferences.targetLanguage(for: formattedSource),
+            targetMode: preferences.targetMode,
+            fixedTargetLanguage: preferences.fixedTargetLanguage,
+            formattingMode: preferences.formattingMode,
+            originalSourceText: text
+        )
+        translationWorkbench = state
+        showTranslationWorkspace(state: state, anchorTopLeft: anchorTopLeft, readOnly: false)
+        startWorkbenchTranslation()
+    }
+
+    private func showTranslationWorkspace(
+        state: TranslationWorkbenchState,
+        anchorTopLeft: NSPoint,
+        readOnly: Bool
+    ) {
+        panelIsResizable = true
+        panelIsRestorable = true
+        userResized = false
+        lastResult = nil
+        copyButton = nil
+        if !readOnly { translationWorkbench = state }
+
+        let visible = (panel?.screen ?? screenFor(point: anchorTopLeft)).visibleFrame
+        let width = min(max(savedPopupSize().width, 660), visible.width - 24)
+        let height = min(max(savedPopupSize().height, 570), visible.height - 24)
+        let workspace = TranslationWorkspaceView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        workspace.autoresizingMask = [.width, .height]
+        workspace.configure(
+            sourceText: state.sourceText,
+            translatedText: state.translatedText,
+            sourceLanguage: state.sourceLanguage,
+            targetLanguage: state.targetLanguage,
+            formattingMode: state.formattingMode,
+            readOnly: readOnly
+        )
+        if readOnly {
+            workspace.setStatus("最近结果 · 只读")
+        } else {
+            workspace.onSourceChanged = { [weak self] text in
+                self?.translationWorkbench?.editSource(text)
+            }
+            workspace.onTranslationChanged = { [weak self] text in
+                self?.translationWorkbench?.editTranslation(text)
+            }
+            workspace.onTargetChanged = { [weak self] language in
+                self?.translationWorkbench?.setTargetLanguage(language)
+            }
+            workspace.onFormattingChanged = { [weak self, weak workspace] mode in
+                guard let self, var current = self.translationWorkbench else { return }
+                current.setFormattingMode(mode)
+                let source = SmartTranslationFormatter.format(workspace?.sourceText ?? current.sourceText, mode: mode)
+                let translated = SmartTranslationFormatter.format(workspace?.translatedText ?? current.translatedText, mode: mode)
+                current.editSource(source)
+                current.editTranslation(translated)
+                self.translationWorkbench = current
+                workspace?.updateTexts(source: source, translation: translated, sourceLanguage: current.sourceLanguage)
+                workspace?.setStatus(mode == .smart ? "已应用智能排版" : "已切换为严格保留")
+            }
+            workspace.onRetranslate = { [weak self] in self?.startWorkbenchTranslation() }
+            workspace.onSpeak = { [weak self] field in self?.toggleWorkbenchSpeech(field) }
+        }
+        translationWorkspaceView = workspace
+        addWorkspaceTopActions(to: workspace)
+        addGrip(to: workspace)
+
+        var rect = NSRect(
+            x: anchorTopLeft.x,
+            y: anchorTopLeft.y - height,
+            width: width,
+            height: height
+        )
+        rect = clampToScreen(rect, anchor: anchorTopLeft)
+        present(content: workspace, rect: rect)
+        if !readOnly { workspace.focusSource() }
+    }
+
+    private func startWorkbenchTranslation() {
+        guard var state = translationWorkbench,
+              let workspace = translationWorkspaceView else { return }
+        stopSpeech(resetState: true)
+        let mode = workspace.formattingMode
+        let formattedSource = SmartTranslationFormatter.format(workspace.sourceText, mode: mode)
+        let formattedTranslation = SmartTranslationFormatter.format(workspace.translatedText, mode: mode)
+        state.setFormattingMode(mode)
+        state.editSource(formattedSource)
+        state.editTranslation(formattedTranslation)
+        guard let request = state.beginRetranslation() else {
+            workspace.setStatus("请输入需要翻译的原文", isError: true)
+            return
+        }
+        translationWorkbench = state
+        workspace.updateTexts(
+            source: formattedSource,
+            translation: formattedTranslation,
+            sourceLanguage: state.sourceLanguage
+        )
+        workspace.setLoading(true, message: "正在翻译并恢复排版…")
         translationRequestInFlight = true
-        showMessage("翻译中…", isError: false, anchorTopLeft: anchorTopLeft)
-        translate(text) { [weak self] result, errMsg in
-            guard let self = self, gen == self.generation else { return }   // 浮窗已被关闭/换词:丢弃结果
+        translationTask?.cancel()
+        let historyID = state.historyID
+        translationTask = translateDocument(
+            request.sourceText,
+            targetLanguage: request.targetLanguage,
+            formattingMode: request.formattingMode
+        ) { [weak self, weak workspace] result in
+            guard let self,
+                  var current = self.translationWorkbench,
+                  current.historyID == historyID else { return }
             self.translationRequestInFlight = false
-            if let errMsg = errMsg {
-                self.showMessage(errMsg, isError: true)
-            } else {
-                let finalResult = result ?? "(空)"
-                self.showMessage(finalResult, isError: false, showCopy: true, markdown: true)
+            self.translationTask = nil
+            switch result {
+            case .success(let translated):
+                current.editSource(translated.sourceText)
+                guard current.completeRetranslation(
+                    generation: request.generation,
+                    translatedText: translated.translatedText,
+                    detectedSourceLanguage: translated.detectedSourceLanguage
+                ) else { return }
+                self.translationWorkbench = current
+                workspace?.updateTexts(
+                    source: current.sourceText,
+                    translation: current.translatedText,
+                    sourceLanguage: current.sourceLanguage
+                )
+                workspace?.setTargetLanguage(current.targetLanguage)
+                workspace?.setLoading(false, message: "翻译完成 · 可继续编辑、复制或朗读")
                 self.recordRecentResult(.translationSucceeded(
-                    id: UUID().uuidString,
-                    sourceText: self.recentContextSummary(text),
-                    resultText: finalResult,
-                    menuSummary: self.recentMenuSummary(text),
+                    id: current.historyID,
+                    sourceText: current.sourceText,
+                    resultText: current.translatedText,
+                    menuSummary: self.recentMenuSummary(current.sourceText),
                     completedAt: Date()
                 ))
+            case .failure(.cancelled):
+                current.cancelRetranslation()
+                self.translationWorkbench = current
+                workspace?.setLoading(false)
+            case .failure(let error):
+                _ = current.failRetranslation(generation: request.generation)
+                self.translationWorkbench = current
+                workspace?.setLoading(false)
+                workspace?.setStatus(error.localizedDescription, isError: true)
             }
             gAppDelegate?.refreshMenu()
         }
+        gAppDelegate?.refreshMenu()
+    }
+
+    private func addWorkspaceTopActions(to container: NSView) {
+        let size: CGFloat = 28
+        let top: CGFloat = 12
+        let right: CGFloat = 16
+        let gap: CGFloat = 8
+        let y = container.bounds.height - top - size
+        let close = CircleIconButton(
+            frame: NSRect(x: container.bounds.width - right - size, y: y, width: size, height: size),
+            iconKind: .close
+        )
+        close.target = self
+        close.action = #selector(dismiss)
+        close.toolTip = "关闭窗口"
+        close.autoresizingMask = [.minXMargin, .minYMargin]
+        container.addSubview(close)
+
+        let pin = CircleIconButton(
+            frame: NSRect(x: close.frame.minX - gap - size, y: y, width: size, height: size),
+            iconKind: .pin
+        )
+        pin.target = self
+        pin.action = #selector(onTogglePin)
+        pin.toolTip = "钉住窗口"
+        pin.autoresizingMask = [.minXMargin, .minYMargin]
+        container.addSubview(pin)
+        pinButton = pin
+        updatePinButton()
+    }
+
+    private func toggleWorkbenchSpeech(_ field: TranslationWorkbenchField) {
+        guard var state = translationWorkbench else { return }
+        if field == .source {
+            state.editSource(translationWorkspaceView?.sourceText ?? state.sourceText)
+        } else {
+            state.editTranslation(translationWorkspaceView?.translatedText ?? state.translatedText)
+        }
+        let action = state.toggleSpeech(for: field)
+        translationWorkbench = state
+        switch action {
+        case .none:
+            return
+        case .stop:
+            stopSpeech(resetState: false)
+            translationWorkspaceView?.setSpeakingField(nil)
+            translationWorkspaceView?.setStatus("朗读已停止")
+        case .stopAndStart(_, let request), .start(let request):
+            stopSpeech(resetState: false)
+            startSpeech(request)
+        }
+    }
+
+    private func startSpeech(_ speech: TranslationSpeechRequest) {
+        let config = AppConfig.shared.speech
+        guard let request = config.buildSynthesisRequest(
+            text: speech.text,
+            languageCode: speech.languageCode
+        ) else {
+            translationWorkbench?.speechDidStop()
+            translationWorkspaceView?.setSpeakingField(nil)
+            translationWorkspaceView?.setStatus(
+                "Azure Speech 配置不完整，请在设置 → Azure 中填写 Endpoint 和 Key",
+                isError: true
+            )
+            return
+        }
+        speechGeneration += 1
+        let currentGeneration = speechGeneration
+        translationWorkspaceView?.setSpeakingField(speech.field)
+        translationWorkspaceView?.setStatus("正在生成语音…")
+        speechTask = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self, currentGeneration == self.speechGeneration else { return }
+                self.speechTask = nil
+                if let error {
+                    self.translationWorkbench?.speechDidStop()
+                    self.translationWorkspaceView?.setSpeakingField(nil)
+                    self.translationWorkspaceView?.setStatus(
+                        "语音请求失败：\(config.parseNetworkError(error))",
+                        isError: true
+                    )
+                    return
+                }
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                guard (200..<300).contains(status), let data, !data.isEmpty else {
+                    self.translationWorkbench?.speechDidStop()
+                    self.translationWorkspaceView?.setSpeakingField(nil)
+                    self.translationWorkspaceView?.setStatus(config.parseError(statusCode: status, data: data), isError: true)
+                    return
+                }
+                do {
+                    let player = try AVAudioPlayer(data: data)
+                    player.delegate = self
+                    self.speechPlayer = player
+                    player.prepareToPlay()
+                    player.play()
+                    self.translationWorkspaceView?.setStatus("正在朗读 · 再点一次可停止")
+                } catch {
+                    self.translationWorkbench?.speechDidStop()
+                    self.translationWorkspaceView?.setSpeakingField(nil)
+                    self.translationWorkspaceView?.setStatus("Azure Speech 音频无法播放", isError: true)
+                }
+            }
+        }
+        speechTask?.resume()
+    }
+
+    private func stopSpeech(resetState: Bool) {
+        speechGeneration += 1
+        speechTask?.cancel()
+        speechTask = nil
+        speechPlayer?.stop()
+        speechPlayer = nil
+        if resetState { translationWorkbench?.speechDidStop() }
+        translationWorkspaceView?.setSpeakingField(nil)
+    }
+
+    private func stopTranslationWork() {
+        translationTask?.cancel()
+        translationTask = nil
+        translationRequestInFlight = false
+        stopSpeech(resetState: true)
+    }
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        speechPlayer = nil
+        translationWorkbench?.speechDidStop()
+        translationWorkspaceView?.setSpeakingField(nil)
+        translationWorkspaceView?.setStatus(flag ? "朗读完成" : "朗读已停止")
     }
 
     @objc private func onCopyClicked() {
@@ -1690,6 +2013,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         suspendedCurrentWindow = nil
         translationRequestInFlight = false
         generation += 1
+        stopTranslationWork()
         stopConversation()
         if let old = panel {
             old.orderOut(nil)
@@ -1702,6 +2026,8 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         lockFrameAfterRestore = false
         panelIsResizable = false
         panelIsRestorable = false
+        translationWorkbench = nil
+        translationWorkspaceView = nil
         pendingText = text
     }
 
@@ -2158,42 +2484,58 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate {
         }
     }
 
-    // UI 自测入口(GLINT_UITEST=translate):按钮 → 翻译中 → 短译文 → 长译文,
-    // 验证自适应尺寸(短译文小窗、长译文到上限)+ 顶边固定向下生长 + 帧动画;不走网络。
+    // UI 自测入口(GLINT_UITEST=translate):离线渲染双编辑区、排版、按钮和状态反馈；不走网络。
     func runDemoTranslate() {
-        let p = NSScreen.main.map { NSPoint(x: $0.frame.midX - 100, y: $0.frame.midY + 220) } ?? NSEvent.mouseLocation
-        showButton(text: "hello world", fallbackPoint: p)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.showMessage("翻译中…", isError: false)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            self?.showMessage("你好,世界", isError: false, showCopy: true, markdown: true)
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-            guard let self = self else { return }
-            logLine("UITEST translate short frame=\(NSStringFromRect(self.panel?.frame ?? .zero))")
-            self.capturePanel(to: "\(NSHomeDirectory())/glint_translate_short.png")
-            let long = """
-            **机器翻译**(Machine Translation)是利用计算机把一种自然语言转换为另一种自然语言的过程。
+        let anchor = NSScreen.main.map { NSPoint(x: $0.frame.midX - 330, y: $0.frame.midY + 285) } ?? NSEvent.mouseLocation
+        let source = """
+        Subject: Product update
 
-            核心内容解读:
+        Hello team,
+        The release is ready for final review. Please verify the following items:
 
-            1. **什么是"逐轮循环"?**
-                - 这是你最熟悉的交互方式:你发一条指令,AI 读代码、修改、测试,然后把结果交还给你。
-                - 每一轮都由你手动触发,AI 自己判断何时停止。
-            2. **关键问题:AI 如何判断"做完了"?**
-                - 如果不明确告诉 AI 验证标准,它通常只以"代码没报错"作为完成标准。
-            3. **解决方案:用 `SKILL.md` 文件定义验证清单**
+        1. Sign-in flow
+        2. Translation formatting
+        3. Speech playback
 
-            如今的大语言模型不仅能翻译,还能在保留语气、术语和格式的同时按需调整正式程度,\
-            例如把口语化的产品公告改写成正式的新闻稿风格。
+        > Keep the original structure when copying the result.
+        """
+        let state = TranslationWorkbenchState(
+            historyID: "UITEST-translation-workspace",
+            sourceText: source,
+            translatedText: "",
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            formattingMode: .smart
+        )
+        translationWorkbench = state
+        showTranslationWorkspace(state: state, anchorTopLeft: anchor, readOnly: false)
+        translationWorkspaceView?.setLoading(true, message: "正在翻译并恢复排版…")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            guard let self else { return }
+            let translation = """
+            主题：产品更新
+
+            团队各位好：
+            版本已经可以进入最终检查。请验证以下项目：
+
+            1. 登录流程
+            2. 翻译排版
+            3. 语音朗读
+
+            > 复制结果时保留当前结构。
             """
-            self.showMessage(long, isError: false, showCopy: true, markdown: true)
+            self.translationWorkbench?.editTranslation(translation)
+            self.translationWorkspaceView?.updateTexts(source: source, translation: translation, sourceLanguage: "en")
+            self.translationWorkspaceView?.setLoading(false, message: "翻译完成 · 可继续编辑、复制或朗读")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.4) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self = self else { return }
-            logLine("UITEST translate long frame=\(NSStringFromRect(self.panel?.frame ?? .zero))")
-            self.capturePanel(to: "\(NSHomeDirectory())/glint_translate_long.png")
+            let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
+            let path = (outDir as NSString).appendingPathComponent("translation-workspace.png")
+            try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+            self.capturePanel(to: path)
+            print("UITEST translate PASS")
+            logLine("UITEST translate PASS frame=\(NSStringFromRect(self.panel?.frame ?? .zero)) path=\(path)")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { NSApp.terminate(nil) }
         }
     }
@@ -3182,6 +3524,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             self.settings.selectTab(2)
                             logLine("UITEST settings tab=2 (Azure) frame=\(self.settings.windowObject?.frame ?? .zero)")
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
+                                try? FileManager.default.createDirectory(
+                                    atPath: outDir,
+                                    withIntermediateDirectories: true,
+                                    attributes: nil
+                                )
+                                let path = URL(fileURLWithPath: outDir)
+                                    .appendingPathComponent("glint-azure-settings.png").path
+                                guard self.settings.writeWindowSnapshot(to: path) else { exit(1) }
+                                print("UITEST settings PASS")
                                 NSApp.terminate(nil)
                             }
                         }

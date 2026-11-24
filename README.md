@@ -11,7 +11,7 @@
 
 ![macOS](https://img.shields.io/badge/macOS-12.0%2B%20Universal-141413?style=flat-square&logo=apple&logoColor=FAF9F5)
 ![Swift](https://img.shields.io/badge/Swift-5%20%7C%20AppKit-D97757?style=flat-square&logo=swift&logoColor=white)
-![Azure](https://img.shields.io/badge/Azure-Translator%20%7C%20OpenAI%20v1-0078D4?style=flat-square&logo=microsoftazure&logoColor=white)
+![Azure](https://img.shields.io/badge/Azure-Translator%20%7C%20OpenAI%20v1%20%7C%20Speech-0078D4?style=flat-square&logo=microsoftazure&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-3DA639?style=flat-square)
 
 <br>
@@ -26,19 +26,20 @@
 
 - **显式快捷键，跨应用稳定取词** —— 在 Safari、Chrome、微信、企业微信、VS Code、邮件和标准文本应用中，先选中文字，再按默认 `` ` `` 键。Glint 优先读取当前 Accessibility 选区，必要时使用完整备份与安全恢复剪贴板的受保护复制；普通拖选、双击、滚动条、表格列宽和窗口调整不会自动弹窗。
 - **跨屏框选，看图精讲** —— 按下快捷键框选屏幕任意区域，无论是报错日志、架构图、论文公式还是外文界面，都能直接交由多模态模型为您拆解，并支持在面板底部连续追问。
-- **暖纸书卷风阅读体验** —— 采用柔和护眼的暖米白纸感界面与精细的富文本排版，流式输出实时呈现，浮窗随内容自然延展，让技术与长文阅读更加从容。
+- **可编辑智能翻译工作台** —— 原文和译文上下对照、均可修改；智能排版修复邮件、网页和 PDF 的硬换行并保留标题、段落、列表、引用、代码与简单表格，可随时重译、复制当前排版结果或朗读。
 - **最近结果随手回看** —— 菜单栏保留当前进程内最近 10 条已完成文字翻译和文字问答；点击即可打开只读结果，退出 Glint 后自动清空，不写入磁盘，也不会从历史重新请求 Azure。
-- **Azure 双服务分工** —— 文字翻译调用 Azure Text Translation；上下文提问、多轮追问与截图理解调用 Azure OpenAI 新版 `/openai/v1/`。
+- **Azure 三服务分工** —— 文字翻译调用 Azure Text Translation；上下文提问、多轮追问与截图理解调用 Azure OpenAI 新版 `/openai/v1/`；原文和译文朗读调用 Azure Speech。
 - **纯粹原生，本机直连** —— 采用纯原生 Swift 与 AppKit 构建，轻量流畅且无第三方框架负担；所有配置与密钥仅保存在本机，内容仅在主动触发时直发你的 Azure 资源。
 
 | 交互场景 | 触发方式 | 行为说明 |
 | :--- | :--- | :--- |
-| **文字翻译** | 选中文字 → 按文字命令快捷键（默认 `` ` ``）→ 点击 **「翻译」** | Azure Translator 自动识别源语言；中文译英文，其他语言译简体中文 |
+| **文字翻译** | 选中文字 → 按文字命令快捷键（默认 `` ` ``）→ 点击 **「翻译」** | 打开原文 / 译文双编辑区；默认中文译英文、其他语言译简体中文，也可固定或临时切换目标语言 |
+| **排版、复制与朗读** | 翻译工作台内操作 | 智能排版同时应用于原文和译文；复制写入纯文本与 RTF；原文、译文可分别调用 Azure Speech 朗读 |
 | **文字提问** | 选中文字 → 按文字命令快捷键（默认 `` ` ``）→ 点击 **「提问」** | 将选中内容暂存内存并弹出紧凑输入框，输入非空 Prompt 后连同上下文流式提问 |
 | **多轮追问** | 会话浮窗底部输入框 → 回车 | 围绕当前选中文本或截图内容继续深入提问 |
 | **截图提问** | 按下截图快捷键（默认 `⌃⌥E`）→ 框选区域 | 可在「设置 → 基础」独立录制；框选画面暂存内存并弹出输入框，输入自定义 Prompt 后由多模态模型回答 |
 | **最近结果** | 菜单栏图标 → **「最近结果」** → 选择一条 | 只读回看本次运行内最近 10 条文字翻译或文字问答；可复制、钉住和缩放，不保存截图、不继续追问 |
-| **连接探测** | 菜单栏图标 → **「设置… → Azure」** | 分别测试 Translator 与 Azure GPT 的 Endpoint、Key、Region 和部署名称 |
+| **连接探测** | 菜单栏图标 → **「设置… → Azure」** | 分别测试 Translator、Azure GPT 与 Azure Speech 的当前 Endpoint 和 Key 等配置 |
 
 ## Get started
 
@@ -52,10 +53,11 @@
    - 点击屏幕右上角菜单栏 **Glint 图标** → **「设置…」** → **「Azure」**。
    - **Azure Text Translation**：填写 Translator Endpoint、API Key 与 Region（全局单服务资源可留空 Region）。
    - **Azure GPT**：填写形如 `https://<resource>.openai.azure.com/openai/v1` 的 Endpoint、API Key 与 Azure Deployment Name；部署支持图片时勾选截图能力。
-   - 两组配置都可先点 **「测试连接」** 验证当前输入，再点击 **「保存」**。
+   - **Azure Speech**：填写完整的 TTS REST Endpoint（通常形如 `https://<region>.tts.speech.microsoft.com/cognitiveservices/v1`）、Speech Key；Voice 保持 `auto` 即可按语言自动选择。
+   - 三组配置都可先点 **「测试连接」** 验证当前输入，再点击 **「保存」**。
 3. **开启系统权限与开机自启**
    - 在 **「设置… → 权限」** 页开启 **「辅助功能」**（跨应用按需读取选中文字和复制降级所需）与 **「屏幕录制」**（截图提问必需）。
-   - 在 **「设置… → 基础」** 页可分别录制文字命令与截图快捷键、勾选 **「在开机时启动」**，并查看 Azure 配置概览。
+   - 在 **「设置… → 基础」** 页可分别录制文字命令与截图快捷键、选择自动或固定目标语言、选择智能排版或严格保留、勾选 **「在开机时启动」**，并查看 Azure 配置概览；翻译目标与排版选择会立即保存。
 
 ## Learn more
 

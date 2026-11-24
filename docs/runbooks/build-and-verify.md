@@ -8,10 +8,10 @@
 
 ```bash
 # 安全单键规则、零修饰键注册与截图快捷键既有契约
-harness run hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_test"'
+harness run hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_test" glint-app/TranslationFormatting.swift glint-app/TranslationDocument.swift glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_test"'
 
 # 文字命令快捷键、配置迁移、冲突与切换事务
-harness run text-command-hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/text_command_hotkey_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/text_command_hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/text_command_hotkey_test"'
+harness run text-command-hotkey-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/text_command_hotkey_test" glint-app/TranslationFormatting.swift glint-app/TranslationDocument.swift glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/text_command_hotkey_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/text_command_hotkey_test"'
 
 # 录制提示、非法单键错误与状态清理
 harness run hotkey-recording-feedback-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_recording_feedback_test" glint-app/ScreenshotHotKey.swift glint-app/hotkey_recording_feedback_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_recording_feedback_test"'
@@ -32,7 +32,7 @@ harness run geometry-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DI
 harness run markdown-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/markdown_test" glint-app/Markdown.swift glint-app/markdown_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/markdown_test"'
 
 # Azure Translator / Azure OpenAI v1 协议
-harness run azure-services-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/azure_test" glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/azure_services_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/azure_test"'
+harness run azure-services-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/azure_test" glint-app/TranslationFormatting.swift glint-app/TranslationDocument.swift glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/azure_services_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/azure_test"'
 
 # 结果窗口图钉 / 隐藏 / 恢复
 harness run popup-lifecycle-tests --timeout 30s -- bash -c 'swiftc -parse-as-library -o "$HARNESS_WORK_DIR/popup_test" glint-app/PopupLifecycle.swift glint-app/popup_lifecycle_tests.swift && "$HARNESS_WORK_DIR/popup_test"'
@@ -44,6 +44,14 @@ harness run recent-results-app-tests --timeout 30s -- bash -c 'swiftc -parse-as-
 # 设置窗口录制与 Carbon 生命周期
 harness run hotkey-recording-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/hotkey_recording_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/hotkey_recording_lifecycle_test"'
 harness run carbon-hotkey-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/carbon_hotkey_lifecycle_test" glint-app/ScreenshotHotKey.swift glint-app/HotKey.swift glint-app/carbon_hotkey_lifecycle_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/carbon_hotkey_lifecycle_test"'
+
+# 智能排版、文档拆片与重组、工作台状态、富文本复制、翻译偏好与 Azure Speech
+harness run translation-formatting-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/translation_formatting_test" glint-app/TranslationFormatting.swift glint-app/translation_formatting_contract_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/translation_formatting_test"'
+harness run translation-document-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/translation_document_test" glint-app/TranslationDocument.swift glint-app/translator_document_contract_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/translation_document_test"'
+harness run translation-workbench-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/translation_workbench_test" glint-app/RecentResults.swift glint-app/TranslationFormatting.swift glint-app/TranslationWorkbench.swift glint-app/translation_workbench_contract_tests.swift -framework Foundation && "$HARNESS_WORK_DIR/translation_workbench_test"'
+harness run translation-clipboard-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/translation_clipboard_test" glint-app/TranslationClipboard.swift glint-app/translation_clipboard_contract_tests.swift -framework AppKit && "$HARNESS_WORK_DIR/translation_clipboard_test"'
+harness run translation-preferences-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/translation_preferences_test" glint-app/TranslationFormatting.swift glint-app/TranslationDocument.swift glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/translation_preferences_contract_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/translation_preferences_test"'
+harness run azure-speech-tests --timeout 30s -- bash -c 'swiftc -o "$HARNESS_WORK_DIR/azure_speech_test" glint-app/TranslationFormatting.swift glint-app/TranslationDocument.swift glint-app/Config.swift glint-app/ScreenshotHotKey.swift glint-app/TextCommandHotKey.swift glint-app/HotKey.swift glint-app/azure_speech_contract_tests.swift -framework Carbon -framework Foundation && "$HARNESS_WORK_DIR/azure_speech_test"'
 ```
 
 若当前机器没有 `harness`，使用 `perl alarm` 或等价进程超时包装逐条执行，并在交付记录中如实说明。
@@ -52,9 +60,9 @@ harness run carbon-hotkey-lifecycle-tests --timeout 30s -- bash -c 'swiftc -o "$
 
 ```bash
 cd glint-app
-SRCS=(main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift RecentResults.swift RecentResultsPresentation.swift)
-swiftc "${SRCS[@]}" -target arm64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -typecheck
-swiftc "${SRCS[@]}" -target x86_64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework Carbon -typecheck
+SRCS=(main.swift Geometry.swift SelectedTextExtractor.swift TextCommandPanelLifecycle.swift TextCommandEntryPolicy.swift AccessibilitySelectionReader.swift TextCommandPanelController.swift Markdown.swift Screenshot.swift Config.swift ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift HotKeyRecorderControl.swift Settings.swift BrandLogo.swift PopupLifecycle.swift RecentResults.swift RecentResultsPresentation.swift TranslationFormatting.swift TranslationDocument.swift TranslationService.swift TranslationWorkbench.swift TranslationClipboard.swift TranslationWorkspaceView.swift)
+swiftc "${SRCS[@]}" -target arm64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Carbon -typecheck
+swiftc "${SRCS[@]}" -target x86_64-apple-macos12.0 -swift-version 5 -framework AppKit -framework ApplicationServices -framework AVFoundation -framework Carbon -typecheck
 ```
 
 ## 3. 应用打包与安装替换
@@ -81,7 +89,8 @@ open /Applications/Glint.app
   ```bash
   GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-text-command-panel.XXXXXX)" GLINT_UITEST=text_command_panel GLINT_UITEST_DIR=/tmp/glint-text-command-panel /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-hotkey-settings.XXXXXX)" GLINT_UITEST=hotkey_settings GLINT_UITEST_DIR=/tmp/glint-hotkey-settings /Applications/Glint.app/Contents/MacOS/Glint
-  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-translate.XXXXXX)" GLINT_UITEST=translate /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-translate.XXXXXX)" GLINT_UITEST=translate GLINT_UITEST_DIR=/tmp/glint-translation-workspace /Applications/Glint.app/Contents/MacOS/Glint
+  GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-settings.XXXXXX)" GLINT_UITEST=settings GLINT_UITEST_DIR=/tmp/glint-azure-settings /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-pin-restore.XXXXXX)" GLINT_UITEST=pin_restore GLINT_UITEST_DIR=/tmp/glint-pin-restore /Applications/Glint.app/Contents/MacOS/Glint
   GLINT_CONFIG_DIR="$(mktemp -d /tmp/glint-config-recent-results.XXXXXX)" GLINT_UITEST=recent_results GLINT_UITEST_DIR=/tmp/glint-recent-results /Applications/Glint.app/Contents/MacOS/Glint
   ```
