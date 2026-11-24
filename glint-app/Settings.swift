@@ -109,6 +109,10 @@ final class SettingsController: NSObject, NSWindowDelegate {
     private let axStatusLabel = NSTextField(labelWithString: "")
     private let scrStatusLabel = NSTextField(labelWithString: "")
 
+    private let targetModePopup = NSPopUpButton()
+    private let fixedTargetLanguagePopup = NSPopUpButton()
+    private let formattingModePopup = NSPopUpButton()
+
     private let translatorEndpointField = NSTextField()
     private let translatorKeyField = NSSecureTextField()
     private let translatorRegionField = NSTextField()
@@ -122,8 +126,15 @@ final class SettingsController: NSObject, NSWindowDelegate {
     private let gptProbeButton = NSButton(title: "测试连接", target: nil, action: nil)
     private let gptProbeStatus = NSTextField(labelWithString: "")
 
+    private let speechEndpointField = NSTextField()
+    private let speechKeyField = NSSecureTextField()
+    private let speechVoiceField = NSTextField()
+    private let speechProbeButton = NSButton(title: "测试连接", target: nil, action: nil)
+    private let speechProbeStatus = NSTextField(labelWithString: "")
+
     private var translatorProbeGeneration = 0
     private var gptProbeGeneration = 0
+    private var speechProbeGeneration = 0
 
     var windowObject: NSWindow? { window }
 
@@ -193,7 +204,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
     private func build() {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 555),
+            contentRect: NSRect(x: 0, y: 0, width: 660, height: 720),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -344,12 +355,42 @@ final class SettingsController: NSObject, NSWindowDelegate {
         azureRow.orientation = .horizontal
         azureRow.spacing = 10
 
+        targetModePopup.removeAllItems()
+        targetModePopup.addItems(withTitles: ["自动识别（中文→英文，其他→简体中文）", "固定目标语言"])
+        targetModePopup.target = self
+        targetModePopup.action = #selector(onTargetModeChanged)
+        targetModePopup.controlSize = .small
+        fixedTargetLanguagePopup.removeAllItems()
+        fixedTargetLanguagePopup.addItems(withTitles: TranslationWorkspaceView.languageChoices.map { $0.title })
+        fixedTargetLanguagePopup.target = self
+        fixedTargetLanguagePopup.action = #selector(onTranslationPreferenceChanged)
+        fixedTargetLanguagePopup.controlSize = .small
+        let targetControls = NSStackView(views: [targetModePopup, fixedTargetLanguagePopup])
+        targetControls.orientation = .horizontal
+        targetControls.spacing = 8
+        targetControls.alignment = .centerY
+
+        formattingModePopup.removeAllItems()
+        formattingModePopup.addItems(withTitles: ["智能排版", "严格保留"])
+        formattingModePopup.target = self
+        formattingModePopup.action = #selector(onTranslationPreferenceChanged)
+        formattingModePopup.controlSize = .small
+        let formattingHelp = NSTextField(labelWithString: "原文和译文同时应用；复制保留当前排版")
+        formattingHelp.font = .systemFont(ofSize: 11)
+        formattingHelp.textColor = .secondaryLabelColor
+        let formattingControls = NSStackView(views: [formattingModePopup, formattingHelp])
+        formattingControls.orientation = .horizontal
+        formattingControls.spacing = 8
+        formattingControls.alignment = .centerY
+
         return pageStack([
             prefRow(label: "启动", content: launchAtLoginCheck),
             prefRow(label: "文字命令", content: textCommandHotKeyStack, alignTop: true),
             prefRow(label: "截图", content: hotKeyStack, alignTop: true),
+            prefRow(label: "翻译目标", content: targetControls),
+            prefRow(label: "文本排版", content: formattingControls),
             prefRow(label: "Azure", content: azureRow)
-        ], top: 34)
+        ], top: 24)
     }
 
     private func buildPermissionsTab() -> NSView {
@@ -382,16 +423,23 @@ final class SettingsController: NSObject, NSWindowDelegate {
         configureField(gptEndpointField, placeholder: "https://<resource>.openai.azure.com/openai/v1")
         configureField(gptKeyField, placeholder: "Azure OpenAI Key")
         configureField(gptDeploymentField, placeholder: "Azure Deployment Name")
+        configureField(speechEndpointField, placeholder: "https://<region>.tts.speech.microsoft.com/cognitiveservices/v1")
+        configureField(speechKeyField, placeholder: "Azure Speech Key")
+        configureField(speechVoiceField, placeholder: "auto（按语言自动选择声音）")
 
         configureProbeButton(translatorProbeButton, action: #selector(testTranslatorConnection))
         configureProbeButton(gptProbeButton, action: #selector(testGPTConnection))
+        configureProbeButton(speechProbeButton, action: #selector(testSpeechConnection))
         configureStatusLabel(translatorProbeStatus)
         configureStatusLabel(gptProbeStatus)
+        configureStatusLabel(speechProbeStatus)
 
         let translatorActions = NSStackView(views: [translatorProbeButton, translatorProbeStatus])
         translatorActions.orientation = .horizontal; translatorActions.spacing = 10; translatorActions.alignment = .centerY
         let gptActions = NSStackView(views: [gptProbeButton, gptProbeStatus])
         gptActions.orientation = .horizontal; gptActions.spacing = 10; gptActions.alignment = .centerY
+        let speechActions = NSStackView(views: [speechProbeButton, speechProbeStatus])
+        speechActions.orientation = .horizontal; speechActions.spacing = 10; speechActions.alignment = .centerY
 
         let translatorSection = section(title: "Azure Text Translation", rows: [
             fieldRow("Endpoint", translatorEndpointField),
@@ -405,6 +453,12 @@ final class SettingsController: NSObject, NSWindowDelegate {
             fieldRow("部署名称", gptDeploymentField),
             indentRow(gptVisionCheck),
             indentRow(gptActions)
+        ])
+        let speechSection = section(title: "Azure Speech（原文 / 译文朗读）", rows: [
+            fieldRow("Endpoint", speechEndpointField),
+            fieldRow("API Key", speechKeyField),
+            fieldRow("Voice", speechVoiceField),
+            indentRow(speechActions)
         ])
 
         let note = NSTextField(wrappingLabelWithString: "“测试连接”使用当前输入值发起最小真实请求，不会自动保存，可能产生极少量 Azure 用量。")
@@ -420,7 +474,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
         let bottom = NSStackView(views: [hSpacer(), close, save])
         bottom.orientation = .horizontal; bottom.spacing = 8
 
-        let stack = NSStackView(views: [translatorSection, gptSection, note, hSpacer(), separator(), bottom])
+        let stack = NSStackView(views: [translatorSection, gptSection, speechSection, note, hSpacer(), separator(), bottom])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
@@ -436,6 +490,7 @@ final class SettingsController: NSObject, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             translatorSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
             gptSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
+            speechSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56),
             bottom.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -56)
         ])
         return container
@@ -488,8 +543,19 @@ final class SettingsController: NSObject, NSWindowDelegate {
         gptKeyField.stringValue = config.azureOpenAI.apiKey
         gptDeploymentField.stringValue = config.azureOpenAI.deploymentName
         gptVisionCheck.state = config.azureOpenAI.supportsVision ? .on : .off
+        speechEndpointField.stringValue = config.speech.endpoint
+        speechKeyField.stringValue = config.speech.apiKey
+        speechVoiceField.stringValue = config.speech.voice
+        targetModePopup.selectItem(at: config.translationPreferences.targetMode == .automatic ? 0 : 1)
+        let fixedIndex = TranslationWorkspaceView.languageChoices.firstIndex {
+            $0.code.caseInsensitiveCompare(config.translationPreferences.fixedTargetLanguage) == .orderedSame
+        } ?? 0
+        fixedTargetLanguagePopup.selectItem(at: fixedIndex)
+        formattingModePopup.selectItem(at: config.translationPreferences.formattingMode == .smart ? 0 : 1)
+        updateTargetLanguageEnabledState()
         translatorProbeStatus.stringValue = ""
         gptProbeStatus.stringValue = ""
+        speechProbeStatus.stringValue = ""
     }
 
     private func formTranslatorConfig() -> AzureTranslatorConfig {
@@ -506,6 +572,29 @@ final class SettingsController: NSObject, NSWindowDelegate {
             apiKey: gptKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             deploymentName: gptDeploymentField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             supportsVision: gptVisionCheck.state == .on
+        )
+    }
+
+    private func formSpeechConfig() -> AzureSpeechConfig {
+        let rawVoice = speechVoiceField.stringValue
+        return AzureSpeechConfig(
+            endpoint: speechEndpointField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            apiKey: speechKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+            voice: rawVoice.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? AzureSpeechConfig.automaticVoice
+                : rawVoice
+        )
+    }
+
+    private func formTranslationPreferences() -> TranslationPreferences {
+        let index = max(0, fixedTargetLanguagePopup.indexOfSelectedItem)
+        let language = TranslationWorkspaceView.languageChoices[
+            min(index, TranslationWorkspaceView.languageChoices.count - 1)
+        ].code
+        return TranslationPreferences(
+            targetMode: targetModePopup.indexOfSelectedItem == 0 ? .automatic : .fixed,
+            fixedTargetLanguage: language,
+            formattingMode: formattingModePopup.indexOfSelectedItem == 0 ? .smart : .strict
         )
     }
 
@@ -561,6 +650,37 @@ final class SettingsController: NSObject, NSWindowDelegate {
         }.resume()
     }
 
+    @objc private func testSpeechConnection() {
+        let config = formSpeechConfig()
+        guard let request = config.buildProbeRequest() else {
+            setProbeResult(speechProbeStatus, button: speechProbeButton, message: "请检查 Speech Endpoint 和 Key", success: false)
+            return
+        }
+        speechProbeGeneration += 1
+        let generation = speechProbeGeneration
+        beginProbe(speechProbeStatus, button: speechProbeButton)
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self, generation == self.speechProbeGeneration else { return }
+                if let error {
+                    self.setProbeResult(
+                        self.speechProbeStatus,
+                        button: self.speechProbeButton,
+                        message: "网络错误：\(config.parseNetworkError(error))",
+                        success: false
+                    )
+                    return
+                }
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if (200..<300).contains(status), let data, !data.isEmpty {
+                    self.setProbeResult(self.speechProbeStatus, button: self.speechProbeButton, message: "✓ Azure Speech 连接成功", success: true)
+                } else {
+                    self.setProbeResult(self.speechProbeStatus, button: self.speechProbeButton, message: config.parseError(statusCode: status, data: data), success: false)
+                }
+            }
+        }.resume()
+    }
+
     private func beginProbe(_ label: NSTextField, button: NSButton) {
         button.isEnabled = false
         label.textColor = .secondaryLabelColor
@@ -577,7 +697,14 @@ final class SettingsController: NSObject, NSWindowDelegate {
     @objc private func saveSettings() {
         let translator = formTranslatorConfig()
         let gpt = formGPTConfig()
-        guard AppConfig.shared.setAzureServices(translator: translator, azureOpenAI: gpt) else {
+        let speech = formSpeechConfig()
+        let preferences = formTranslationPreferences()
+        guard AppConfig.shared.setTranslationServices(
+            translator: translator,
+            azureOpenAI: gpt,
+            speech: speech,
+            preferences: preferences
+        ) else {
             alert("保存失败：无法写入 ~/.config/glint/config.json，请检查目录权限或磁盘空间。")
             return
         }
@@ -595,9 +722,46 @@ final class SettingsController: NSObject, NSWindowDelegate {
 
         let translatorReady = !AppConfig.shared.translator.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let deployment = AppConfig.shared.azureOpenAI.deploymentName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let speechReady = !AppConfig.shared.speech.apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let translatorText = translatorReady ? "Translator 已配置" : "Translator 未配置"
         let gptText = deployment.isEmpty ? "GPT 未配置" : "GPT：\(deployment)"
-        azureSummaryLabel.stringValue = "\(translatorText) · \(gptText)"
+        let speechText = speechReady ? "Speech 已配置" : "Speech 未配置"
+        azureSummaryLabel.stringValue = "\(translatorText) · \(gptText) · \(speechText)"
+    }
+
+    @objc private func onTargetModeChanged() {
+        updateTargetLanguageEnabledState()
+        persistTranslationPreferences()
+    }
+
+    @objc private func onTranslationPreferenceChanged() {
+        persistTranslationPreferences()
+    }
+
+    private func persistTranslationPreferences() {
+        let preferences = formTranslationPreferences()
+        guard AppConfig.shared.setTranslationPreferences(preferences) else {
+            restoreTranslationPreferenceControls()
+            alert("保存失败：无法写入 ~/.config/glint/config.json，请检查目录权限或磁盘空间。")
+            return
+        }
+        updateTargetLanguageEnabledState()
+        gAppDelegate?.refreshMenu()
+    }
+
+    private func restoreTranslationPreferenceControls() {
+        let preferences = AppConfig.shared.translationPreferences
+        targetModePopup.selectItem(at: preferences.targetMode == .automatic ? 0 : 1)
+        let fixedIndex = TranslationWorkspaceView.languageChoices.firstIndex {
+            $0.code.caseInsensitiveCompare(preferences.fixedTargetLanguage) == .orderedSame
+        } ?? 0
+        fixedTargetLanguagePopup.selectItem(at: fixedIndex)
+        formattingModePopup.selectItem(at: preferences.formattingMode == .smart ? 0 : 1)
+        updateTargetLanguageEnabledState()
+    }
+
+    private func updateTargetLanguageEnabledState() {
+        fixedTargetLanguagePopup.isEnabled = targetModePopup.indexOfSelectedItem == 1
     }
 
     @objc private func onLaunchAtLoginToggled() {
@@ -761,8 +925,10 @@ final class SettingsController: NSObject, NSWindowDelegate {
         textCommandHotKeyRecordingCoordinator.settingsWindowWillClose()
         translatorProbeGeneration += 1
         gptProbeGeneration += 1
+        speechProbeGeneration += 1
         translatorProbeButton.isEnabled = true
         gptProbeButton.isEnabled = true
+        speechProbeButton.isEnabled = true
     }
 
     private func pageStack(_ rows: [NSView], top: CGFloat) -> NSView {

@@ -57,14 +57,37 @@ enum StreamEvent: Equatable {
     case error(String)
 }
 
+struct TranslationPreferences: Codable, Equatable {
+    var targetMode: TranslationTargetMode
+    var fixedTargetLanguage: String
+    var formattingMode: TranslationFormattingMode
+
+    init(
+        targetMode: TranslationTargetMode = .automatic,
+        fixedTargetLanguage: String = "zh-Hans",
+        formattingMode: TranslationFormattingMode = .smart
+    ) {
+        self.targetMode = targetMode
+        self.fixedTargetLanguage = fixedTargetLanguage
+        self.formattingMode = formattingMode
+    }
+
+    func targetLanguage(for text: String) -> String {
+        targetMode == .fixed
+            ? fixedTargetLanguage
+            : AzureTranslatorConfig.targetLanguage(for: text)
+    }
+}
+
 private enum AzureErrorFormatter {
     static func sanitized(_ value: String, secrets: [String]) -> String {
         var result = value
-        for secret in secrets {
-            let clean = secret.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !clean.isEmpty {
-                result = result.replacingOccurrences(of: clean, with: "[已隐藏]", options: [.caseInsensitive])
-            }
+        let cleanSecrets = secrets
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .sorted { $0.count > $1.count }
+        for secret in cleanSecrets {
+            result = result.replacingOccurrences(of: secret, with: "[已隐藏]", options: [.caseInsensitive])
         }
         return result
     }
@@ -126,9 +149,23 @@ struct AzureTranslatorConfig: Codable, Equatable {
     }
 
     func buildRequest(text: String) -> URLRequest? {
+        buildRequest(text: text, targetLanguage: Self.targetLanguage(for: text))
+    }
+
+    func buildRequest(text: String, targetLanguage: String) -> URLRequest? {
+        buildRequest(
+            fragments: [TranslationFragment(id: "fragment-0000", text: text)],
+            targetLanguage: targetLanguage
+        )
+    }
+
+    func buildRequest(fragments: [TranslationFragment], targetLanguage: String) -> URLRequest? {
         let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanKey.isEmpty,
-              let url = translateURL(target: Self.targetLanguage(for: text)) else { return nil }
+        let cleanTarget = targetLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanKey.isEmpty, !cleanTarget.isEmpty, !fragments.isEmpty,
+              fragments.count <= TranslationBatchLimits.azureDefault.maxItems,
+              fragments.reduce(0, { $0 + $1.text.count }) <= TranslationBatchLimits.azureDefault.maxCharacters,
+              let url = translateURL(target: cleanTarget) else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
@@ -138,7 +175,9 @@ struct AzureTranslatorConfig: Codable, Equatable {
         if !cleanRegion.isEmpty {
             request.setValue(cleanRegion, forHTTPHeaderField: "Ocp-Apim-Subscription-Region")
         }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [["Text": text]])
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: fragments.map { ["Text": $0.text] }
+        )
         return request
     }
 
@@ -155,6 +194,27 @@ struct AzureTranslatorConfig: Codable, Equatable {
         return text
     }
 
+    func parseFragmentResponses(
+        data: Data,
+        fragments: [TranslationFragment]
+    ) -> [TranslationFragmentResponse]? {
+        guard let items = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              items.count == fragments.count else { return nil }
+        var responses: [TranslationFragmentResponse] = []
+        responses.reserveCapacity(fragments.count)
+        for (index, item) in items.enumerated() {
+            guard let translations = item["translations"] as? [[String: Any]],
+                  let translatedText = translations.first?["text"] as? String else { return nil }
+            let detectedLanguage = (item["detectedLanguage"] as? [String: Any])?["language"] as? String
+            responses.append(TranslationFragmentResponse(
+                id: fragments[index].id,
+                translatedText: translatedText,
+                detectedLanguage: detectedLanguage
+            ))
+        }
+        return responses
+    }
+
     func parseError(statusCode: Int, data: Data?) -> String {
         AzureErrorFormatter.message(
             statusCode: statusCode,
@@ -162,6 +222,123 @@ struct AzureTranslatorConfig: Codable, Equatable {
             service: "Azure Translator",
             secrets: [apiKey]
         )
+    }
+}
+
+struct AzureSpeechConfig: Codable, Equatable {
+    static let automaticVoice = "auto"
+
+    var endpoint: String
+    var apiKey: String
+    var voice: String
+
+    init(endpoint: String = "", apiKey: String = "", voice: String = AzureSpeechConfig.automaticVoice) {
+        self.endpoint = endpoint
+        self.apiKey = apiKey
+        self.voice = voice
+    }
+
+    func voiceName(for languageCode: String) -> String {
+        let cleanVoice = voice.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleanVoice.isEmpty, cleanVoice != Self.automaticVoice { return cleanVoice }
+        let code = languageCode.lowercased()
+        if code.hasPrefix("zh-hant") || code.hasPrefix("zh-tw") { return "zh-TW-HsiaoChenNeural" }
+        if code.hasPrefix("zh") { return "zh-CN-XiaoxiaoNeural" }
+        if code.hasPrefix("ja") { return "ja-JP-NanamiNeural" }
+        if code.hasPrefix("ko") { return "ko-KR-SunHiNeural" }
+        if code.hasPrefix("fr") { return "fr-FR-DeniseNeural" }
+        if code.hasPrefix("de") { return "de-DE-KatjaNeural" }
+        if code.hasPrefix("es") { return "es-ES-ElviraNeural" }
+        if code.hasPrefix("pt") { return "pt-BR-FranciscaNeural" }
+        return "en-US-JennyNeural"
+    }
+
+    func locale(for languageCode: String) -> String {
+        String(voiceName(for: languageCode).split(separator: "-").prefix(2).joined(separator: "-"))
+    }
+
+    func buildSynthesisRequest(text: String, languageCode: String) -> URLRequest? {
+        let cleanEndpoint = endpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanEndpoint.isEmpty, !cleanKey.isEmpty,
+              let url = URL(string: cleanEndpoint),
+              url.scheme?.lowercased() == "https", url.host != nil else { return nil }
+        let rawVoice = voice
+        let cleanVoice = rawVoice.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard rawVoice == cleanVoice || rawVoice.isEmpty,
+              cleanVoice.isEmpty || cleanVoice == Self.automaticVoice || Self.isValidVoiceName(cleanVoice) else {
+            return nil
+        }
+        let voiceName = voiceName(for: languageCode)
+        guard Self.isValidVoiceName(voiceName) else { return nil }
+        let locale = locale(for: languageCode)
+        let escaped = Self.escapeXML(SpeechTextFormatter.speechText(from: text))
+            .replacingOccurrences(of: "\n\n", with: "<break time=\"700ms\"/>")
+            .replacingOccurrences(of: "\n", with: "<break time=\"350ms\"/>")
+        let ssml = "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\" xml:lang=\"\(locale)\"><voice name=\"\(voiceName)\">\(escaped)</voice></speak>"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 45
+        request.setValue(cleanKey, forHTTPHeaderField: "Ocp-Apim-Subscription-Key")
+        request.setValue("application/ssml+xml", forHTTPHeaderField: "Content-Type")
+        request.setValue("audio-24khz-48kbitrate-mono-mp3", forHTTPHeaderField: "X-Microsoft-OutputFormat")
+        request.setValue("Glint", forHTTPHeaderField: "User-Agent")
+        request.httpBody = ssml.data(using: .utf8)
+        return request
+    }
+
+    func buildProbeRequest() -> URLRequest? {
+        buildSynthesisRequest(text: "Speech connection test.", languageCode: "en")
+    }
+
+    func parseError(statusCode: Int, data: Data?) -> String {
+        AzureErrorFormatter.message(
+            statusCode: statusCode,
+            data: data,
+            service: "Azure Speech",
+            secrets: sanitizedSecrets
+        )
+    }
+
+    func parseNetworkError(_ error: Error) -> String {
+        AzureErrorFormatter.sanitized(error.localizedDescription, secrets: sanitizedSecrets)
+    }
+
+    private var sanitizedSecrets: [String] {
+        var values = [apiKey, endpoint]
+        if let components = URLComponents(string: endpoint) {
+            if let query = components.query, !query.isEmpty {
+                values.append(query)
+                values.append("?" + query)
+            }
+            if let encodedQuery = components.percentEncodedQuery, !encodedQuery.isEmpty {
+                values.append(encodedQuery)
+                values.append("?" + encodedQuery)
+            }
+            for item in components.queryItems ?? [] {
+                if let value = item.value, !value.isEmpty {
+                    values.append(value)
+                    values.append("\(item.name)=\(value)")
+                }
+            }
+        }
+        return values
+    }
+
+    private static func isValidVoiceName(_ value: String) -> Bool {
+        value.range(
+            of: #"^[A-Za-z]{2,3}-[A-Za-z]{2,4}-[A-Za-z0-9]+Neural$"#,
+            options: .regularExpression
+        ) != nil
+    }
+
+    private static func escapeXML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
     }
 }
 
@@ -815,12 +992,16 @@ final class AppConfig: Codable {
     var azureOpenAI: AzureOpenAIConfig
     var screenshotHotKey: ScreenshotHotKey
     var textCommandHotKey: TextCommandHotKey
+    var translationPreferences: TranslationPreferences
+    var speech: AzureSpeechConfig
 
     private enum CodingKeys: String, CodingKey {
         case translator
         case azureOpenAI
         case screenshotHotKey
         case textCommandHotKey
+        case translationPreferences
+        case speech
     }
 
     private static var defaultURL: URL {
@@ -831,12 +1012,16 @@ final class AppConfig: Codable {
         translator: AzureTranslatorConfig = AzureTranslatorConfig(),
         azureOpenAI: AzureOpenAIConfig = AzureOpenAIConfig(),
         screenshotHotKey: ScreenshotHotKey = .default,
-        textCommandHotKey: TextCommandHotKey = .default
+        textCommandHotKey: TextCommandHotKey = .default,
+        translationPreferences: TranslationPreferences = TranslationPreferences(),
+        speech: AzureSpeechConfig = AzureSpeechConfig()
     ) {
         self.translator = translator
         self.azureOpenAI = azureOpenAI
         self.screenshotHotKey = screenshotHotKey
         self.textCommandHotKey = textCommandHotKey
+        self.translationPreferences = translationPreferences
+        self.speech = speech
     }
 
     init(from decoder: Decoder) throws {
@@ -845,6 +1030,8 @@ final class AppConfig: Codable {
         azureOpenAI = try container.decode(AzureOpenAIConfig.self, forKey: .azureOpenAI)
         screenshotHotKey = try container.decodeIfPresent(ScreenshotHotKey.self, forKey: .screenshotHotKey) ?? .default
         textCommandHotKey = try container.decodeIfPresent(TextCommandHotKey.self, forKey: .textCommandHotKey) ?? .default
+        translationPreferences = try container.decodeIfPresent(TranslationPreferences.self, forKey: .translationPreferences) ?? TranslationPreferences()
+        speech = try container.decodeIfPresent(AzureSpeechConfig.self, forKey: .speech) ?? AzureSpeechConfig()
     }
 
     func encode(to encoder: Encoder) throws {
@@ -853,6 +1040,8 @@ final class AppConfig: Codable {
         try container.encode(azureOpenAI, forKey: .azureOpenAI)
         try container.encode(screenshotHotKey, forKey: .screenshotHotKey)
         try container.encode(textCommandHotKey, forKey: .textCommandHotKey)
+        try container.encode(translationPreferences, forKey: .translationPreferences)
+        try container.encode(speech, forKey: .speech)
     }
 
     func load() {
@@ -861,6 +1050,8 @@ final class AppConfig: Codable {
         azureOpenAI = loaded.azureOpenAI
         screenshotHotKey = loaded.screenshotHotKey
         textCommandHotKey = loaded.textCommandHotKey
+        translationPreferences = loaded.translationPreferences
+        speech = loaded.speech
     }
 
     @discardableResult
@@ -923,6 +1114,42 @@ final class AppConfig: Codable {
         if save() { return true }
         translator = oldTranslator
         azureOpenAI = oldAzureOpenAI
+        return false
+    }
+
+    @discardableResult
+    func setTranslationServices(
+        translator newTranslator: AzureTranslatorConfig,
+        azureOpenAI newAzureOpenAI: AzureOpenAIConfig,
+        speech newSpeech: AzureSpeechConfig,
+        preferences newPreferences: TranslationPreferences
+    ) -> Bool {
+        let oldTranslator = translator
+        let oldAzureOpenAI = azureOpenAI
+        let oldSpeech = speech
+        let oldPreferences = translationPreferences
+        translator = newTranslator
+        azureOpenAI = newAzureOpenAI
+        speech = newSpeech
+        translationPreferences = newPreferences
+        if save() { return true }
+        translator = oldTranslator
+        azureOpenAI = oldAzureOpenAI
+        speech = oldSpeech
+        translationPreferences = oldPreferences
+        return false
+    }
+
+    @discardableResult
+    func setTranslationPreferences(
+        _ newPreferences: TranslationPreferences,
+        to url: URL? = nil
+    ) -> Bool {
+        let oldPreferences = translationPreferences
+        translationPreferences = newPreferences
+        let persisted = url.map { save(to: $0) } ?? save()
+        if persisted { return true }
+        translationPreferences = oldPreferences
         return false
     }
 
