@@ -1,7 +1,7 @@
 # Glint 智能排版可靠性与长文工作台实施计划
 
-日期：2026-11-24  
-状态：实施中  
+日期：2026-11-24
+状态：已完成
 对应规格：`docs/superpowers/specs/2026-11-24-ai-formatting-reliability-and-long-document-layout-design.md`
 
 ## 1. 独立契约测试红灯
