@@ -1067,6 +1067,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
     private var panelIsRestorable = false                        // 当前态外部点击后是否只隐藏并保留内存上下文
     private var growTimer: Timer?                                // 会话浮窗随流式内容长高的节流定时器
     private var userResized = false                              // 本轮会话中用户手动改过尺寸 → 不再自动长高
+    private var translationPanelLayoutState = TranslationWorkspacePanelLayoutState()
     private var hiddenFrame: NSRect?                             // 隐藏前的位置与尺寸,菜单恢复时原样还原
     private var lockFrameAfterRestore = false                    // 恢复后保持隐藏前尺寸,流式内容改在内部滚动
     private var frameAnimations = 0                              // 进行中的窗口帧动画计数(>0 时 p.frame 是中间态,长高/存尺寸必须跳过)
@@ -1142,6 +1143,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         if let frame = hiddenFrame {
             programmaticSize = frame.size
             p.setFrame(frame, display: false)
+            syncTranslationWorkspaceBody(event: .restored)
         }
         NSApp.activate(ignoringOtherApps: true)
         p.makeKeyAndOrderFront(nil)
@@ -1360,6 +1362,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
     private func applyRestoredFrame(_ frame: NSRect) {
         programmaticSize = frame.size
         panel?.setFrame(frame, display: true)
+        syncTranslationWorkspaceBody(event: .restored)
     }
 
     private func restorePinIfNeeded(_ shouldPin: Bool) {
@@ -1635,10 +1638,14 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
             }, completionHandler: { [weak self] in
                 old?.removeFromSuperview()
                 guard let self = self else { return }
-                self.frameAnimations -= 1
-                guard self.body === newBody, let paper2 = self.panel?.contentView else { return }
-                newBody.frame = paper2.bounds
-                newBody.autoresizingMask = finalMask
+                self.frameAnimations = max(0, self.frameAnimations - 1)
+                guard let paper2 = self.panel?.contentView else { return }
+                if newBody.superview === paper2 {
+                    newBody.frame = paper2.bounds
+                    newBody.autoresizingMask = finalMask
+                }
+                guard self.body === newBody else { return }
+                self.syncTranslationWorkspaceBody(event: .animationCompleted)
                 if self.isAwaitingInitialPrompt {
                     self.focusAskField()
                 }
@@ -1651,6 +1658,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
             p.contentView?.addSubview(newBody)
             body = newBody
             panel = p
+            syncTranslationWorkspaceBody(event: .outerBoundsChanged)
             p.alphaValue = 0
             p.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup({ ctx in
@@ -1696,6 +1704,7 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         panelIsResizable = true
         panelIsRestorable = true
         userResized = false
+        translationPanelLayoutState.resetForNewTranslation()
         lastResult = nil
         copyButton = nil
         if !readOnly { translationWorkbench = state }
@@ -1757,6 +1766,10 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
             }
         }
         translationWorkspaceView = workspace
+        workspace.onPreferredHeightChanged = { [weak self, weak workspace] recommendedHeight in
+            guard let self, let workspace, self.translationWorkspaceView === workspace else { return }
+            self.resizeTranslationWorkspaceIfNeeded(to: recommendedHeight)
+        }
         addWorkspaceTopActions(to: workspace)
         addGrip(to: workspace)
 
@@ -1770,6 +1783,61 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         rect = clampToScreen(rect, anchor: anchorTopLeft)
         present(content: workspace, rect: rect)
         if !readOnly { workspace.focusSource() }
+    }
+
+    private func syncTranslationWorkspaceBody(event: TranslationWorkspacePanelLayoutEvent) {
+        guard let workspace = translationWorkspaceView,
+              body === workspace,
+              let paper = panel?.contentView else { return }
+        let layout = TranslationWorkspacePanelLayoutPolicy.activeBodyLayout(
+            paperBounds: paper.bounds,
+            event: event
+        )
+        workspace.frame = layout.frame
+        workspace.autoresizingMask = layout.autoresizingMask
+        workspace.layoutSubtreeIfNeeded()
+    }
+
+    private func resizeTranslationWorkspaceIfNeeded(to recommendedHeight: CGFloat) {
+        guard let workspace = translationWorkspaceView,
+              body === workspace,
+              let p = panel,
+              p.isVisible,
+              !lockFrameAfterRestore else {
+            syncTranslationWorkspaceBody(event: .outerBoundsChanged)
+            return
+        }
+
+        let visible = p.screen?.visibleFrame
+            ?? visibleFrame(for: NSPoint(x: p.frame.midX, y: p.frame.maxY))
+        let safeHeight = max(0, visible.height - 24)
+        let recommended = min(
+            max(recommendedHeight, TranslationWorkspaceView.compactPreferredHeight),
+            safeHeight
+        )
+        let resolvedHeight = translationPanelLayoutState.resolvedHeight(
+            current: p.frame.height,
+            recommended: recommended
+        )
+        guard abs(resolvedHeight - p.frame.height) >= 1 else {
+            syncTranslationWorkspaceBody(event: .outerBoundsChanged)
+            return
+        }
+
+        var target = p.frame
+        target.origin.y = target.maxY - resolvedHeight
+        target.size.height = resolvedHeight
+        target = clampToScreen(
+            target,
+            anchor: NSPoint(x: p.frame.minX, y: p.frame.maxY)
+        )
+        programmaticSize = target.size
+        translationPanelLayoutState.recordProgrammaticResize()
+        frameAnimations += 1
+        p.setFrame(target, display: true, animate: true)
+        frameAnimations = max(0, frameAnimations - 1)
+        guard panel === p, translationWorkspaceView === workspace else { return }
+        syncTranslationWorkspaceBody(event: .animationCompleted)
     }
 
     private func startWorkbenchTranslation() {
@@ -2802,11 +2870,43 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
             )
             self.translationWorkspaceView?.setLoading(false, message: "翻译完成 · 可继续编辑、复制或朗读")
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+            guard let self = self else { return }
+            let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
+            try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+            self.capturePanel(
+                to: (outDir as NSString).appendingPathComponent("translation-workspace-compact.png")
+            )
+            let longSource = (1...48)
+                .map { "Synthetic source paragraph \($0) for adaptive layout verification." }
+                .joined(separator: "\n")
+            let longTranslation = (1...48)
+                .map { "虚构译文段落 \($0)，仅用于自适应布局验收。" }
+                .joined(separator: "\n")
+            self.translationWorkspaceView?.updateTexts(
+                source: longSource,
+                translation: longTranslation,
+                sourceLanguage: "en"
+            )
+            self.translationWorkspaceView?.setStatus("自适应长文布局验收")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self] in
             guard let self = self else { return }
             let outDir = ProcessInfo.processInfo.environment["GLINT_UITEST_DIR"] ?? NSTemporaryDirectory()
             let path = (outDir as NSString).appendingPathComponent("translation-workspace.png")
             try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+            guard let workspace = self.translationWorkspaceView,
+                  let paper = self.panel?.contentView,
+                  workspace.frame == paper.bounds,
+                  workspace.autoresizingMask.contains(.width),
+                  workspace.autoresizingMask.contains(.height),
+                  (self.panel?.frame.height ?? 0) > TranslationWorkspaceView.compactPreferredHeight else {
+                let panelFrame = NSStringFromRect(self.panel?.frame ?? .zero)
+                let paperBounds = NSStringFromRect(self.panel?.contentView?.bounds ?? .zero)
+                let workspaceFrame = NSStringFromRect(self.translationWorkspaceView?.frame ?? .zero)
+                fputs("FAIL: translation workspace did not adapt and fill the panel panel=\(panelFrame) paper=\(paperBounds) workspace=\(workspaceFrame)\n", stderr)
+                exit(1)
+            }
             self.capturePanel(to: path)
             print("UITEST translate PASS")
             logLine("UITEST translate PASS frame=\(NSStringFromRect(self.panel?.frame ?? .zero)) path=\(path)")
@@ -3504,6 +3604,10 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         return defaultPopupSize
     }
     private func savePopupSize(_ s: NSSize) { UserDefaults.standard.set([s.width, s.height], forKey: kPopupSizeKey) }
+    private func savePopupWidth(_ width: CGFloat) {
+        let current = savedPopupSize()
+        savePopupSize(NSSize(width: width, height: current.height))
+    }
 
     // 给内容浮窗右下角加拖拽握把(松手存尺寸)
     private func addGrip(to container: NSView) {
@@ -3512,13 +3616,20 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         g.onCommit = { [weak self] in
             guard let self = self, let p = self.panel else { return }
             self.userResized = true                 // 用户手动定了尺寸:本轮会话不再自动长高
-            self.savePopupSize(p.frame.size)
+            if self.translationWorkspaceView != nil {
+                self.translationPanelLayoutState.recordUserResize()
+                self.savePopupWidth(p.frame.width)
+            } else {
+                self.savePopupSize(p.frame.size)
+            }
+            self.syncTranslationWorkspaceBody(event: .outerBoundsChanged)
         }
         container.addSubview(g)
     }
 
     func windowDidResize(_ notification: Notification) {
         syncTranscriptLayout()
+        syncTranslationWorkspaceBody(event: .outerBoundsChanged)
     }
 
     // 边缘缩放结束:记住尺寸(仅内容浮窗),并交还尺寸控制权(本轮会话不再自动长高)。
@@ -3528,7 +3639,13 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         if abs(p.frame.width - programmaticSize.width) < 2,
            abs(p.frame.height - programmaticSize.height) < 2 { return }
         userResized = true
-        savePopupSize(p.frame.size)
+        if translationWorkspaceView != nil {
+            translationPanelLayoutState.recordUserResize()
+            savePopupWidth(p.frame.width)
+        } else {
+            savePopupSize(p.frame.size)
+        }
+        syncTranslationWorkspaceBody(event: .outerBoundsChanged)
     }
 
     private func makePanel(_ rect: NSRect, isPill: Bool = false) -> NSPanel {

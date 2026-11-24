@@ -1,5 +1,47 @@
 import AppKit
 
+enum TranslationWorkspacePanelLayoutEvent {
+    case outerBoundsChanged
+    case animationCompleted
+    case restored
+}
+
+struct TranslationWorkspaceActiveBodyLayout {
+    let frame: NSRect
+    let autoresizingMask: NSView.AutoresizingMask
+}
+
+enum TranslationWorkspacePanelLayoutPolicy {
+    static func activeBodyLayout(
+        paperBounds: NSRect,
+        event: TranslationWorkspacePanelLayoutEvent
+    ) -> TranslationWorkspaceActiveBodyLayout {
+        _ = event
+        return TranslationWorkspaceActiveBodyLayout(
+            frame: paperBounds,
+            autoresizingMask: [.width, .height]
+        )
+    }
+}
+
+struct TranslationWorkspacePanelLayoutState {
+    private(set) var userResized = false
+
+    mutating func recordProgrammaticResize() {}
+
+    mutating func recordUserResize() {
+        userResized = true
+    }
+
+    mutating func resetForNewTranslation() {
+        userResized = false
+    }
+
+    func resolvedHeight(current: CGFloat, recommended: CGFloat) -> CGFloat {
+        userResized ? current : recommended
+    }
+}
+
 final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     static let compactPreferredHeight: CGFloat = 430
     static let longDocumentPreferredHeight: CGFloat = 760
@@ -25,6 +67,7 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     var onPairAIAction: ((TranslationFormattingMode) -> Void)?
     var onRetranslate: (() -> Void)?
     var onSpeak: ((TranslationWorkbenchField) -> Void)?
+    var onPreferredHeightChanged: ((CGFloat) -> Void)?
 
     private let sourceView = NSTextView()
     private let translationView = NSTextView()
@@ -60,14 +103,16 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     }
 
     static func preferredHeight(source: String, translation: String) -> CGFloat {
-        let longest = max(source.count, translation.count)
-        let lines = max(
+        let longestCharacterCount = max(source.count, translation.count)
+        let actualLineCount = max(
             source.components(separatedBy: .newlines).count,
             translation.components(separatedBy: .newlines).count
         )
-        return longest <= 1_600 && lines <= 14
-            ? compactPreferredHeight
-            : longDocumentPreferredHeight
+        let estimatedWrappedLineCount = Int(ceil(Double(longestCharacterCount) / 115.0))
+        let visualLineDemand = max(actualLineCount, estimatedWrappedLineCount)
+        let rawHeight = compactPreferredHeight + CGFloat(max(0, visualLineDemand - 14) * 8)
+        let quantizedHeight = ceil(rawHeight / 10) * 10
+        return min(max(quantizedHeight, compactPreferredHeight), longDocumentPreferredHeight)
     }
 
     static func initialPresentationHeight(
@@ -76,11 +121,9 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         savedHeight: CGFloat,
         availableHeight: CGFloat
     ) -> CGFloat {
+        _ = savedHeight
         let safeAvailableHeight = max(0, availableHeight - 24)
-        return min(
-            max(savedHeight, preferredHeight(source: source, translation: translation)),
-            safeAvailableHeight
-        )
+        return min(preferredHeight(source: source, translation: translation), safeAvailableHeight)
     }
 
     var sourceText: String { sourceView.string }
@@ -176,6 +219,7 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         isProgrammaticChange = false
         if field == .source { sourceIsDirty = true }
         sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
+        updateAdaptiveHeight(source: sourceView.string, translation: translationView.string)
         applyReadOnlyState()
     }
 
@@ -488,11 +532,16 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         retranslateButton.keyEquivalentModifierMask = []
     }
 
-    private func updateAdaptiveHeight(source: String, translation: String) {
-        let preferredHeight = Self.preferredHeight(source: source, translation: translation)
-        preferredContentHeight = preferredHeight
-        if preferredHeight == Self.compactPreferredHeight, frame.height > preferredHeight {
-            frame.size.height = preferredHeight
+    private func updateAdaptiveHeight(
+        source: String,
+        translation: String,
+        notifyController: Bool = true
+    ) {
+        let nextHeight = Self.preferredHeight(source: source, translation: translation)
+        let changed = preferredContentHeight != nextHeight
+        preferredContentHeight = nextHeight
+        if changed && notifyController {
+            onPreferredHeightChanged?(nextHeight)
         }
     }
 
@@ -510,7 +559,11 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         } else if (notification.object as? NSTextView) === translationView {
             onTranslationChanged?(translationView.string)
         }
-        updateAdaptiveHeight(source: sourceView.string, translation: translationView.string)
+        updateAdaptiveHeight(
+            source: sourceView.string,
+            translation: translationView.string,
+            notifyController: false
+        )
         applyReadOnlyState()
     }
 

@@ -225,11 +225,11 @@ final class TestTranslationWorkspaceCardHierarchy {
 }
 
 final class TestTranslationWorkspaceAdaptiveEditors {
-    static func test_shortContent_configurationAdoptsApproximately430PointCompactHeight() {
+    static func test_shortContent_configurationReportsCompactHeightWithoutChangingActualFrame() {
         let view = TranslationWorkspaceView(
             frame: NSRect(x: 0, y: 0, width: 900, height: 600)
         )
-        let initialPresentationHeight = view.frame.height
+        let callerProvidedFrame = view.frame
         view.configure(
             sourceText: "Short source.",
             translatedText: "短译文。",
@@ -239,15 +239,12 @@ final class TestTranslationWorkspaceAdaptiveEditors {
             readOnly: false
         )
         view.layoutSubtreeIfNeeded()
-        let adoptedHeight = view.frame.height
         let compactFittingHeight = view.fittingSize.height
 
         TranslationWorkspacePresentationContractTestSupport.expect(
             abs(compactFittingHeight - 430) <= 1
-                && abs(adoptedHeight - 430) <= 1
-                && adoptedHeight < initialPresentationHeight
-                && adoptedHeight == compactFittingHeight,
-            "TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationAdoptsApproximately430PointCompactHeight"
+                && view.frame == callerProvidedFrame,
+            "TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationReportsCompactHeightWithoutChangingActualFrame"
         )
     }
 
@@ -661,7 +658,7 @@ enum TranslationWorkspacePresentationContractTests {
         _ = NSApplication.shared
         TestTranslationWorkspaceCardHierarchy.test_sourceAndTranslation_areSeparateBoundedCardsWithTheirOwnActions()
         TestTranslationWorkspaceCardHierarchy.test_translationCardHeader_containsTargetLanguageSelector()
-        TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationAdoptsApproximately430PointCompactHeight()
+        TestTranslationWorkspaceAdaptiveEditors.test_shortContent_configurationReportsCompactHeightWithoutChangingActualFrame()
         TestTranslationWorkspaceAdaptiveEditors.test_longContent_prefersApproximately760PointInitialHeight()
         TestTranslationWorkspaceAdaptiveEditors.test_900By760Workspace_givesEachIndependentEditorAtLeast240VisiblePoints()
         TestTranslationWorkspaceAdaptiveEditors.test_longContent_keepsTwoIndependentVerticalScrollRegions()
