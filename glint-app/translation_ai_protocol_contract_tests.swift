@@ -33,6 +33,17 @@ enum TranslationAIProtocolContractTestSupport {
         guard let data = request?.httpBody else { return nil }
         return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
+
+    static func automaticJSON(
+        sourceBlocks: [[String: Any]],
+        translationBlocks: [[String: Any]]
+    ) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: [
+            "source_blocks": sourceBlocks,
+            "translation_blocks": translationBlocks
+        ], options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
 }
 
 final class TestTranslationAIStructuredRequest {
@@ -102,6 +113,55 @@ final class TestTranslationAIStructuredResponse {
         )
     }
 
+    static func test_markdownFencesWithOrWithoutLanguageTag_extractCompleteJSONObject() {
+        let service = TranslationAIService(config: AzureOpenAIConfig(
+            endpoint: "https://fictional-resource.openai.azure.invalid/openai/v1",
+            apiKey: "fictional-gpt-key",
+            deploymentName: "fictional-deployment"
+        ))
+        let inner = TranslationAIProtocolContractTestSupport.automaticJSON(
+            sourceBlocks: [["type": "paragraph", "text": "Fictional source."]],
+            translationBlocks: [["type": "paragraph", "text": "虚构译文。"]]
+        )
+        let wrapped = [
+            "```json\n\(inner)\n```",
+            "```\n\(inner)\n```"
+        ]
+
+        TranslationAIProtocolContractTestSupport.expect(
+            wrapped.allSatisfy {
+                service.parseAutomaticResponse(
+                    data: TranslationAIProtocolContractTestSupport.responseEnvelope(content: $0)
+                ) != nil
+            },
+            "TestTranslationAIStructuredResponse.test_markdownFencesWithOrWithoutLanguageTag_extractCompleteJSONObject"
+        )
+    }
+
+    static func test_explanatoryTextAndLaterObject_extractFirstCompleteJSONObject() {
+        let service = TranslationAIService(config: AzureOpenAIConfig(
+            endpoint: "https://fictional-resource.openai.azure.invalid/openai/v1",
+            apiKey: "fictional-gpt-key",
+            deploymentName: "fictional-deployment"
+        ))
+        let sourceText = "Literal } before {stage} says \"ready\"."
+        let translationText = "字面量 } 位于 {stage} 前，并表示 \"ready\"。"
+        let inner = TranslationAIProtocolContractTestSupport.automaticJSON(
+            sourceBlocks: [["type": "paragraph", "text": sourceText]],
+            translationBlocks: [["type": "paragraph", "text": translationText]]
+        )
+        let content = "Here is the requested object:\n\(inner)\nAdditional metadata: {\"ignored\":true}"
+        let result = service.parseAutomaticResponse(
+            data: TranslationAIProtocolContractTestSupport.responseEnvelope(content: content)
+        )
+
+        TranslationAIProtocolContractTestSupport.expect(
+            result?.sourceBlocks == [.paragraph(sourceText)]
+                && result?.translationBlocks == [.paragraph(translationText)],
+            "TestTranslationAIStructuredResponse.test_explanatoryTextAndLaterObject_extractFirstCompleteJSONObject"
+        )
+    }
+
     static func test_unknownBlockType_isRejectedInsteadOfRenderedAsGenericContent() {
         let service = TranslationAIService(config: AzureOpenAIConfig(
             endpoint: "https://fictional-resource.openai.azure.invalid/openai/v1",
@@ -132,21 +192,39 @@ final class TestTranslationAIStructuredResponse {
         )
     }
 
-    static func test_mismatchedBlockCountOrTypeBetweenSourceAndTranslation_isRejected() {
+    static func test_differentBlockCountsBetweenSourceAndTranslation_areAcceptedIndependently() {
         let service = TranslationAIService(config: AzureOpenAIConfig(
             endpoint: "https://fictional-resource.openai.azure.invalid/openai/v1",
             apiKey: "fictional-gpt-key",
             deploymentName: "fictional-deployment"
         ))
         let mismatchedCount = #"{"source_blocks":[{"type":"heading","text":"Status"},{"type":"paragraph","text":"CASE-2141"}],"translation_blocks":[{"type":"heading","text":"状态 CASE-2141"}]}"#
-        let mismatchedType = #"{"source_blocks":[{"type":"paragraph","text":"CASE-2141"}],"translation_blocks":[{"type":"heading","text":"CASE-2141"}]}"#
-        let inputs = [mismatchedCount, mismatchedType].map {
-            TranslationAIProtocolContractTestSupport.responseEnvelope(content: $0)
-        }
+        let result = service.parseAutomaticResponse(
+            data: TranslationAIProtocolContractTestSupport.responseEnvelope(content: mismatchedCount)
+        )
 
         TranslationAIProtocolContractTestSupport.expect(
-            inputs.allSatisfy { service.parseAutomaticResponse(data: $0) == nil },
-            "TestTranslationAIStructuredResponse.test_mismatchedBlockCountOrTypeBetweenSourceAndTranslation_isRejected"
+            result?.sourceBlocks == [.heading("Status"), .paragraph("CASE-2141")]
+                && result?.translationBlocks == [.heading("状态 CASE-2141")],
+            "TestTranslationAIStructuredResponse.test_differentBlockCountsBetweenSourceAndTranslation_areAcceptedIndependently"
+        )
+    }
+
+    static func test_differentBlockTypesBetweenSourceAndTranslation_areAcceptedIndependently() {
+        let service = TranslationAIService(config: AzureOpenAIConfig(
+            endpoint: "https://fictional-resource.openai.azure.invalid/openai/v1",
+            apiKey: "fictional-gpt-key",
+            deploymentName: "fictional-deployment"
+        ))
+        let mismatchedType = #"{"source_blocks":[{"type":"paragraph","text":"CASE-2141"}],"translation_blocks":[{"type":"heading","text":"CASE-2141"}]}"#
+        let result = service.parseAutomaticResponse(
+            data: TranslationAIProtocolContractTestSupport.responseEnvelope(content: mismatchedType)
+        )
+
+        TranslationAIProtocolContractTestSupport.expect(
+            result?.sourceBlocks == [.paragraph("CASE-2141")]
+                && result?.translationBlocks == [.heading("CASE-2141")],
+            "TestTranslationAIStructuredResponse.test_differentBlockTypesBetweenSourceAndTranslation_areAcceptedIndependently"
         )
     }
 }
@@ -156,9 +234,12 @@ enum TranslationAIProtocolContractTests {
     static func main() {
         TestTranslationAIStructuredRequest.test_automaticSmartRequest_isOneNonStreamingChatCompletionContainingBothSidesAndMode()
         TestTranslationAIStructuredResponse.test_validSourceAndTranslationBlocks_decodeInOrder()
+        TestTranslationAIStructuredResponse.test_markdownFencesWithOrWithoutLanguageTag_extractCompleteJSONObject()
+        TestTranslationAIStructuredResponse.test_explanatoryTextAndLaterObject_extractFirstCompleteJSONObject()
         TestTranslationAIStructuredResponse.test_unknownBlockType_isRejectedInsteadOfRenderedAsGenericContent()
         TestTranslationAIStructuredResponse.test_modelVisualParameters_areRejectedInsteadOfInfluencingNativeRendering()
-        TestTranslationAIStructuredResponse.test_mismatchedBlockCountOrTypeBetweenSourceAndTranslation_isRejected()
+        TestTranslationAIStructuredResponse.test_differentBlockCountsBetweenSourceAndTranslation_areAcceptedIndependently()
+        TestTranslationAIStructuredResponse.test_differentBlockTypesBetweenSourceAndTranslation_areAcceptedIndependently()
 
         print(
             TranslationAIProtocolContractTestSupport.failures == 0

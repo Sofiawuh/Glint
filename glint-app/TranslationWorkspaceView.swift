@@ -1,6 +1,9 @@
 import AppKit
 
 final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
+    static let compactPreferredHeight: CGFloat = 430
+    static let longDocumentPreferredHeight: CGFloat = 760
+
     static let languageChoices: [(code: String, title: String)] = [
         ("zh-Hans", "简体中文"),
         ("zh-Hant", "繁体中文"),
@@ -47,12 +50,36 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     private var aiFieldInFlight: TranslationWorkbenchField?
     private var isPairAIProcessing = false
     private var sourceIsDirty = false
-    private var compactPreferredHeight: CGFloat?
+    private var preferredContentHeight: CGFloat?
 
     override var fittingSize: NSSize {
         NSSize(
             width: max(frame.width, 660),
-            height: compactPreferredHeight ?? max(frame.height, 520)
+            height: preferredContentHeight ?? max(frame.height, 520)
+        )
+    }
+
+    static func preferredHeight(source: String, translation: String) -> CGFloat {
+        let longest = max(source.count, translation.count)
+        let lines = max(
+            source.components(separatedBy: .newlines).count,
+            translation.components(separatedBy: .newlines).count
+        )
+        return longest <= 1_600 && lines <= 14
+            ? compactPreferredHeight
+            : longDocumentPreferredHeight
+    }
+
+    static func initialPresentationHeight(
+        source: String,
+        translation: String,
+        savedHeight: CGFloat,
+        availableHeight: CGFloat
+    ) -> CGFloat {
+        let safeAvailableHeight = max(0, availableHeight - 24)
+        return min(
+            max(savedHeight, preferredHeight(source: source, translation: translation)),
+            safeAvailableHeight
         )
     }
 
@@ -462,14 +489,10 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     }
 
     private func updateAdaptiveHeight(source: String, translation: String) {
-        let longest = max(source.count, translation.count)
-        let lines = max(
-            source.components(separatedBy: .newlines).count,
-            translation.components(separatedBy: .newlines).count
-        )
-        compactPreferredHeight = longest <= 1_600 && lines <= 14 ? 430 : nil
-        if let compactPreferredHeight, frame.height > compactPreferredHeight {
-            frame.size.height = compactPreferredHeight
+        let preferredHeight = Self.preferredHeight(source: source, translation: translation)
+        preferredContentHeight = preferredHeight
+        if preferredHeight == Self.compactPreferredHeight, frame.height > preferredHeight {
+            frame.size.height = preferredHeight
         }
     }
 

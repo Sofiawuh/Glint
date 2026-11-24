@@ -86,8 +86,7 @@ struct TranslationAIService {
               let translationObjects = object["translation_blocks"] as? [[String: Any]],
               let source = Self.parseBlocks(sourceObjects),
               let translation = Self.parseBlocks(translationObjects),
-              !source.isEmpty, !translation.isEmpty,
-              Self.haveMatchingStructure(source, translation) else { return nil }
+              !source.isEmpty, !translation.isEmpty else { return nil }
         return TranslationAIAutomaticResult(sourceBlocks: source, translationBlocks: translation)
     }
 
@@ -102,15 +101,64 @@ struct TranslationAIService {
     }
 
     private static func parseJSONObject(_ content: String) -> [String: Any]? {
-        var clean = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        if clean.hasPrefix("```") {
-            let lines = clean.components(separatedBy: "\n")
-            if lines.count >= 3 {
-                clean = lines.dropFirst().dropLast().joined(separator: "\n")
-            }
+        for candidate in jsonObjectCandidates(in: content) {
+            guard let data = candidate.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { continue }
+            return object
         }
-        guard let data = clean.data(using: .utf8) else { return nil }
-        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return nil
+    }
+
+    private static func jsonObjectCandidates(in content: String) -> [Substring] {
+        var candidates: [Substring] = []
+        var objectStart: String.Index?
+        var depth = 0
+        var isInsideString = false
+        var isEscaped = false
+        var index = content.startIndex
+
+        while index < content.endIndex {
+            let character = content[index]
+            if objectStart == nil {
+                if character == "{" {
+                    objectStart = index
+                    depth = 1
+                    isInsideString = false
+                    isEscaped = false
+                }
+                index = content.index(after: index)
+                continue
+            }
+
+            if isInsideString {
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    isInsideString = false
+                }
+            } else {
+                switch character {
+                case "\"":
+                    isInsideString = true
+                case "{":
+                    depth += 1
+                case "}":
+                    depth -= 1
+                    if depth == 0, let start = objectStart {
+                        let end = content.index(after: index)
+                        candidates.append(content[start..<end])
+                        objectStart = nil
+                    }
+                default:
+                    break
+                }
+            }
+            index = content.index(after: index)
+        }
+        return candidates
     }
 
     private static func parseBlocks(_ objects: [[String: Any]]) -> [TranslationBlock]? {
@@ -144,26 +192,4 @@ struct TranslationAIService {
         return blocks
     }
 
-    private static func haveMatchingStructure(
-        _ source: [TranslationBlock],
-        _ translation: [TranslationBlock]
-    ) -> Bool {
-        guard source.count == translation.count else { return false }
-        return zip(source, translation).allSatisfy { sourceBlock, translationBlock in
-            switch (sourceBlock, translationBlock) {
-            case (.salutation(_), .salutation(_)),
-                 (.heading(_), .heading(_)),
-                 (.paragraph(_), .paragraph(_)),
-                 (.quote(_), .quote(_)),
-                 (.code(_), .code(_)),
-                 (.table(_), .table(_)),
-                 (.signature(_), .signature(_)):
-                return true
-            case let (.keyPoints(sourceItems), .keyPoints(translationItems)):
-                return sourceItems.count == translationItems.count
-            default:
-                return false
-            }
-        }
-    }
 }

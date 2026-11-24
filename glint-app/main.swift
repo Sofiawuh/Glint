@@ -1702,7 +1702,12 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
 
         let visible = panel?.screen?.visibleFrame ?? visibleFrame(for: anchorTopLeft)
         let width = min(max(savedPopupSize().width, 660), visible.width - 24)
-        let height = min(max(savedPopupSize().height, 570), visible.height - 24)
+        let height = TranslationWorkspaceView.initialPresentationHeight(
+            source: state.sourceText,
+            translation: state.translatedText,
+            savedHeight: savedPopupSize().height,
+            availableHeight: visible.height
+        )
         let workspace = TranslationWorkspaceView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         workspace.autoresizingMask = [.width, .height]
         workspace.configure(

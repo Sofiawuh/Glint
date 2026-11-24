@@ -6,7 +6,10 @@ import Foundation
 //
 // 预期最小运行命令（生产契约存在后）：
 //   swiftc -o /tmp/glint_translation_structured_report_contract_test \
+//     TranslationFormatting.swift TranslationDocument.swift Config.swift \
+//     ScreenshotHotKey.swift TextCommandHotKey.swift HotKey.swift \
 //     TranslationAIService.swift TranslationBlockRenderer.swift TranslationClipboard.swift \
+//     TranslationContentValidator.swift \
 //     translation_structured_report_contract_tests.swift \
 //     -framework AppKit \
 //     && /tmp/glint_translation_structured_report_contract_test
@@ -56,13 +59,51 @@ final class TestTranslationStructuredReportPlainText {
         TranslationStructuredReportContractTestSupport.expect(
             report.plainText.contains("Hi Reviewer,")
                 && report.plainText.contains("Fictional case update")
-                && report.plainText.contains("• Amount is USD 1,234.50")
-                && report.plainText.contains("• Due date is 2026-12-01")
+                && report.plainText.contains("Amount is USD 1,234.50")
+                && report.plainText.contains("Due date is 2026-12-01")
+                && !report.plainText.contains("• Amount is USD 1,234.50")
+                && !report.plainText.contains("1. Amount is USD 1,234.50")
                 && report.plainText.contains("Best regards,\nFictional Sender")
                 && !report.plainText.contains("重点清单")
                 && !report.plainText.contains("邮件签名")
                 && report.attributedText.string == report.plainText,
             "TestTranslationStructuredReportPlainText.test_plainText_preservesContentAndStructureWithoutDecorationLabels"
+        )
+    }
+}
+
+final class TestTranslationStructuredReportFaithfulKeyPoints {
+    static func test_unmarkedKeyPoints_doNotGainMarkersAndPassSmartCharacterValidation() {
+        let original = "Please approve CASE-2141\nReply by 2026-12-01"
+        let report = TranslationBlockRenderer.render(blocks: [
+            .keyPoints(original.components(separatedBy: "\n"))
+        ])
+
+        TranslationStructuredReportContractTestSupport.expect(
+            report.plainText == original
+                && report.attributedText.string == original
+                && TranslationContentValidator.isFormattingFaithful(
+                    original: original,
+                    candidate: report.plainText
+                ),
+            "TestTranslationStructuredReportFaithfulKeyPoints.test_unmarkedKeyPoints_doNotGainMarkersAndPassSmartCharacterValidation"
+        )
+    }
+
+    static func test_existingBulletAndNumberMarkers_remainExactlyUnchanged() {
+        let original = "• Keep CASE-2141\n2) Reply by 2026-12-01"
+        let report = TranslationBlockRenderer.render(blocks: [
+            .keyPoints(original.components(separatedBy: "\n"))
+        ])
+
+        TranslationStructuredReportContractTestSupport.expect(
+            report.plainText == original
+                && report.attributedText.string == original
+                && TranslationContentValidator.isFormattingFaithful(
+                    original: original,
+                    candidate: report.plainText
+                ),
+            "TestTranslationStructuredReportFaithfulKeyPoints.test_existingBulletAndNumberMarkers_remainExactlyUnchanged"
         )
     }
 }
@@ -114,6 +155,8 @@ final class TestTranslationStructuredReportRTF {
 enum TranslationStructuredReportContractTests {
     static func main() {
         TestTranslationStructuredReportPlainText.test_plainText_preservesContentAndStructureWithoutDecorationLabels()
+        TestTranslationStructuredReportFaithfulKeyPoints.test_unmarkedKeyPoints_doNotGainMarkersAndPassSmartCharacterValidation()
+        TestTranslationStructuredReportFaithfulKeyPoints.test_existingBulletAndNumberMarkers_remainExactlyUnchanged()
         TestTranslationStructuredReportRTF.test_rtfCopy_preservesNativeHeadingKeyPointsAndSignatureHierarchy()
 
         print(
