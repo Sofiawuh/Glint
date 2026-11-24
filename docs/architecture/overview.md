@@ -16,6 +16,7 @@ flowchart LR
     Capture --> AppCore
     AppCore --> Geo["几何定位\nGeometry.swift"]
     AppCore --> PopupState["内容窗生命周期\nPopupLifecycle.swift"]
+    AppCore --> RecentResults["进程内最近结果\nRecentResults.swift\nRecentResultsPresentation.swift"]
     AppCore --> Markdown["Markdown 渲染\nMarkdown.swift"]
     AppCore --> Settings["基础 / 权限 / Azure 设置\nSettings.swift"]
     TextHotKey --> HotKeyDomain["双快捷键注册与切换事务\nTextCommandHotKey.swift / HotKey.swift"]
@@ -32,6 +33,7 @@ flowchart LR
 - **文字命令面板**（[TextCommandPanelLifecycle.swift](../../glint-app/TextCommandPanelLifecycle.swift)、[TextCommandPanelController.swift](../../glint-app/TextCommandPanelController.swift)）：使用代际令牌拒绝晚到结果；读取成功后直接显示“翻译｜提问”，没有 marker 或 hover 阶段。面板为 non-activating `NSPanel`，位于当前鼠标右下约 12 pt，并夹紧在鼠标所在显示器 `visibleFrame` 内。
 - **双快捷键事务**（[ScreenshotHotKey.swift](../../glint-app/ScreenshotHotKey.swift)、[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[HotKey.swift](../../glint-app/HotKey.swift)）：截图和文字命令拥有独立配置与 Carbon 注册；`` ` `` 与 `F1–F20` 可以零修饰键注册，其他键必须包含 Control、Option、Shift 或 Command。候选先以非激活状态注册，只有持久化成功且旧注册安全注销后才切换；两套快捷键不得相同。
 - **主控与会话浮窗**（[main.swift](../../glint-app/main.swift)）：连接快捷键、按需取词、命令面板、翻译、流式对话与截图流程。全局事件 Tap 只处理命令面板外部点击、Escape 与自愈，不观察选区手势。
+- **最近结果**（[RecentResults.swift](../../glint-app/RecentResults.swift)、[RecentResultsPresentation.swift](../../glint-app/RecentResultsPresentation.swift)）：只在成功文字翻译或完整文字问答结束后写入纯文本快照；最多 10 条且总量不超过 10 MB。同一问答会话更新原条目，截图、草稿、错误和未完成流不进入历史。菜单按 ID 路由到唯一只读内容窗，不触发 Azure 请求。
 - **几何定位**（[Geometry.swift](../../glint-app/Geometry.swift)）：负责鼠标附近命令面板、内容浮窗边界夹紧以及多显示器截图坐标转换，不读取 AX 选区 bounds。
 - **Azure 配置与协议**（[Config.swift](../../glint-app/Config.swift)、[Settings.swift](../../glint-app/Settings.swift)）：持久化 Azure Translator、Azure OpenAI v1、截图快捷键与文字命令快捷键；设置页提供两套快捷键独立录制和两组 Azure 真实连接探测。
 - **构建与打包**（[build.sh](../../glint-app/build.sh)）：生成 `arm64 + x86_64` Universal Binary、固定签名的 `Glint.app` 与 `Glint.dmg`。
@@ -47,6 +49,7 @@ sequenceDiagram
     participant Popup as PopupController
     participant Translator as Azure Translator
     participant GPT as Azure OpenAI v1
+    participant History as RecentResultStore
 
     User->>User: 在任意应用中选中文字
     User->>HotKey: 按文字命令快捷键
@@ -63,11 +66,13 @@ sequenceDiagram
             Panel->>Popup: 提交文本并关闭命令面板
             Popup->>Translator: 发起翻译
             Translator-->>Popup: 返回译文
+            Popup->>History: 成功后写入翻译快照
         else 点击提问
             Panel->>Popup: 暂存文本上下文并显示提问卡片
             User->>Popup: 输入非空 Prompt
             Popup->>GPT: 发起 SSE 流式请求
             GPT-->>Popup: 返回增量回答并支持追问
+            Popup->>History: 每轮完整回答后更新问答快照
         end
     else 无有效文本
         Reader-->>Panel: 当前代际无文本
@@ -90,3 +95,4 @@ sequenceDiagram
 - **双快捷键约束**：截图与文字命令快捷键不能相同；只有 `` ` `` 与 `F1–F20` 允许不带修饰键；注册、持久化或旧注册注销失败时，旧有效快捷键继续工作。
 - **隐私约束**：Azure Key 仅保存在本机配置；日志不得记录凭据、真实选中文字、剪贴板正文或聊天正文。
 - **会话约束**：选中文字与截图上下文仅保存在当前进程内存中；Azure Translator 只处理翻译，Azure OpenAI v1 只处理提问、追问和截图理解。
+- **历史约束**：最近结果只存在于当前进程内存，不序列化；只保存文字结果的纯文本快照，不保存 AppKit 视图、截图、Base64、Timer、网络任务或 Azure messages。浏览历史时只有一个内容窗，当前空闲草稿可切回恢复。
