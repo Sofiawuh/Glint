@@ -1834,19 +1834,10 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         programmaticSize = target.size
         translationPanelLayoutState.recordProgrammaticResize()
         frameAnimations += 1
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = self.switchDur
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            context.allowsImplicitAnimation = true
-            p.animator().setFrame(target, display: true)
-        }, completionHandler: { [weak self, weak p, weak workspace] in
-            guard let self else { return }
-            self.frameAnimations = max(0, self.frameAnimations - 1)
-            guard let p, let workspace,
-                  self.panel === p,
-                  self.translationWorkspaceView === workspace else { return }
-            self.syncTranslationWorkspaceBody(event: .animationCompleted)
-        })
+        p.setFrame(target, display: true, animate: true)
+        frameAnimations = max(0, frameAnimations - 1)
+        guard panel === p, translationWorkspaceView === workspace else { return }
+        syncTranslationWorkspaceBody(event: .animationCompleted)
     }
 
     private func startWorkbenchTranslation() {
@@ -2910,7 +2901,10 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                   workspace.autoresizingMask.contains(.width),
                   workspace.autoresizingMask.contains(.height),
                   (self.panel?.frame.height ?? 0) > TranslationWorkspaceView.compactPreferredHeight else {
-                fputs("FAIL: translation workspace did not adapt and fill the panel\n", stderr)
+                let panelFrame = NSStringFromRect(self.panel?.frame ?? .zero)
+                let paperBounds = NSStringFromRect(self.panel?.contentView?.bounds ?? .zero)
+                let workspaceFrame = NSStringFromRect(self.translationWorkspaceView?.frame ?? .zero)
+                fputs("FAIL: translation workspace did not adapt and fill the panel panel=\(panelFrame) paper=\(paperBounds) workspace=\(workspaceFrame)\n", stderr)
                 exit(1)
             }
             self.capturePanel(to: path)
