@@ -2604,7 +2604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "文字命令快捷键注册失败，请录制其他组合键"
         }
         if manager.didFallbackToDefault {
-            return "原快捷键不可用，已恢复默认 ⌃⌥T"
+            return "原快捷键不可用，已恢复默认 ` 键"
         }
         return nil
     }

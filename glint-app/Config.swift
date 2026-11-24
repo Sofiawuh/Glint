@@ -884,7 +884,13 @@ final class AppConfig: Codable {
     }
 
     static func loadOrCreate(at url: URL) -> AppConfig {
-        if let loaded = load(from: url) { return loaded }
+        if let loaded = load(from: url) {
+            if loaded.textCommandHotKey == .legacyDefault {
+                loaded.textCommandHotKey = .default
+                _ = loaded.save(to: url)
+            }
+            return loaded
+        }
 
         let fileManager = FileManager.default
         try? fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

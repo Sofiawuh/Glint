@@ -6,7 +6,7 @@
 
 ```mermaid
 flowchart LR
-    User["用户"] --> TextHotKey["文字命令快捷键\n默认 ⌃⌥T"]
+    User["用户"] --> TextHotKey["文字命令快捷键\n默认 ` 键"]
     User --> ScreenshotHotKey["截图快捷键\n默认 ⌃⌥E"]
     TextHotKey --> Extractor["按需取词\nAccessibilitySelectionReader.swift\nSelectedTextExtractor.swift"]
     Extractor --> CommandState["请求代际与面板状态\nTextCommandPanelLifecycle.swift"]
@@ -30,7 +30,7 @@ flowchart LR
 - **文字命令入口**（[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[TextCommandEntryPolicy.swift](../../glint-app/TextCommandEntryPolicy.swift)）：用户选中文字后主动按快捷键才开始取词；鼠标释放、拖选、双击、键盘扩选、`⌘A` 与 `mouseMoved` 不会自动显示入口或触发复制。
 - **按需取词**（[AccessibilitySelectionReader.swift](../../glint-app/AccessibilitySelectionReader.swift)、[SelectedTextExtractor.swift](../../glint-app/SelectedTextExtractor.swift)）：优先读取焦点元素及有限父链的非空 `AXSelectedText`；无文本时执行受保护的 `⌘C`，完整备份剪贴板并按代次安全恢复，拒绝空白、文件、图片与非文本对象。
 - **文字命令面板**（[TextCommandPanelLifecycle.swift](../../glint-app/TextCommandPanelLifecycle.swift)、[TextCommandPanelController.swift](../../glint-app/TextCommandPanelController.swift)）：使用代际令牌拒绝晚到结果；读取成功后直接显示“翻译｜提问”，没有 marker 或 hover 阶段。面板为 non-activating `NSPanel`，位于当前鼠标右下约 12 pt，并夹紧在鼠标所在显示器 `visibleFrame` 内。
-- **双快捷键事务**（[ScreenshotHotKey.swift](../../glint-app/ScreenshotHotKey.swift)、[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[HotKey.swift](../../glint-app/HotKey.swift)）：截图和文字命令拥有独立配置与 Carbon 注册，候选先以非激活状态注册，只有持久化成功且旧注册安全注销后才切换；两套组合键不得相同。
+- **双快捷键事务**（[ScreenshotHotKey.swift](../../glint-app/ScreenshotHotKey.swift)、[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[HotKey.swift](../../glint-app/HotKey.swift)）：截图和文字命令拥有独立配置与 Carbon 注册；`` ` `` 与 `F1–F20` 可以零修饰键注册，其他键必须包含 Control、Option、Shift 或 Command。候选先以非激活状态注册，只有持久化成功且旧注册安全注销后才切换；两套快捷键不得相同。
 - **主控与会话浮窗**（[main.swift](../../glint-app/main.swift)）：连接快捷键、按需取词、命令面板、翻译、流式对话与截图流程。全局事件 Tap 只处理命令面板外部点击、Escape 与自愈，不观察选区手势。
 - **几何定位**（[Geometry.swift](../../glint-app/Geometry.swift)）：负责鼠标附近命令面板、内容浮窗边界夹紧以及多显示器截图坐标转换，不读取 AX 选区 bounds。
 - **Azure 配置与协议**（[Config.swift](../../glint-app/Config.swift)、[Settings.swift](../../glint-app/Settings.swift)）：持久化 Azure Translator、Azure OpenAI v1、截图快捷键与文字命令快捷键；设置页提供两套快捷键独立录制和两组 Azure 真实连接探测。
@@ -87,6 +87,6 @@ sequenceDiagram
 - **剪贴板事务约束**：仅在读取令牌仍有效时认领首个新 `changeCount`；仅当恢复时仍处于本事务复制代次才写回完整备份，第三方竞争更新优先保留。
 - **类型过滤约束**：复制结果必须是新代次的非空文本；包含文件 URL、文件列表或图片类型时整体拒绝，不因同时带纯文本而放行。
 - **非激活约束**：命令面板不得调用 `NSApp.activate` 或 `makeKeyAndOrderFront`；整个可见按钮区域可点击，主动作不依赖 hover。
-- **双快捷键约束**：截图与文字命令快捷键不能相同；注册、持久化或旧注册注销失败时，旧有效快捷键继续工作。
+- **双快捷键约束**：截图与文字命令快捷键不能相同；只有 `` ` `` 与 `F1–F20` 允许不带修饰键；注册、持久化或旧注册注销失败时，旧有效快捷键继续工作。
 - **隐私约束**：Azure Key 仅保存在本机配置；日志不得记录凭据、真实选中文字、剪贴板正文或聊天正文。
 - **会话约束**：选中文字与截图上下文仅保存在当前进程内存中；Azure Translator 只处理翻译，Azure OpenAI v1 只处理提问、追问和截图理解。

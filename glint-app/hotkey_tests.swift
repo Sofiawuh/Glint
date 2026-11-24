@@ -132,6 +132,63 @@ final class TestHotKeyValueContract {
         )
     }
 
+    static func test_unmodifiedGraveAndFunctionKeys_areValidAndReadable() {
+        let unavailableTranslator: (UInt32) -> String? = { _ in nil }
+        let grave = ScreenshotHotKey(
+            keyCode: UInt32(kVK_ANSI_Grave),
+            modifiers: 0
+        )
+        let functionKeys = [kVK_F1, kVK_F12, kVK_F20].map {
+            ScreenshotHotKey(keyCode: UInt32($0), modifiers: 0)
+        }
+
+        HotKeyTestSupport.expect(
+            grave.isValid
+                && grave.displayString(keyLabelTranslator: unavailableTranslator) == "`"
+                && functionKeys.allSatisfy(\.isValid)
+                && functionKeys.map(\.displayString) == ["F1", "F12", "F20"],
+            "TestHotKeyValueContract.test_unmodifiedGraveAndFunctionKeys_areValidAndReadable"
+        )
+    }
+
+    static func test_unmodifiedOrdinaryKeys_areRejectedAcrossTypingNavigationPunctuationAndKeypad() {
+        let ordinaryKeyCodes = [
+            kVK_ANSI_A,
+            kVK_ANSI_1,
+            kVK_LeftArrow,
+            kVK_RightArrow,
+            kVK_Space,
+            kVK_Return,
+            kVK_Tab,
+            kVK_ANSI_Minus,
+            kVK_ANSI_Equal,
+            kVK_ANSI_Slash,
+            kVK_ANSI_Keypad0,
+            kVK_ANSI_KeypadPlus
+        ].map(UInt32.init)
+
+        HotKeyTestSupport.expect(
+            ordinaryKeyCodes.allSatisfy {
+                !ScreenshotHotKey(keyCode: $0, modifiers: 0).isValid
+            },
+            "TestHotKeyValueContract.test_unmodifiedOrdinaryKeys_areRejectedAcrossTypingNavigationPunctuationAndKeypad"
+        )
+    }
+
+    static func test_ordinaryKeyWithEachSupportedModifier_remainsValid() {
+        let modifiers = [controlKey, optionKey, shiftKey, cmdKey].map(UInt32.init)
+
+        HotKeyTestSupport.expect(
+            modifiers.allSatisfy {
+                ScreenshotHotKey(
+                    keyCode: UInt32(kVK_ANSI_A),
+                    modifiers: $0
+                ).isValid
+            },
+            "TestHotKeyValueContract.test_ordinaryKeyWithEachSupportedModifier_remainsValid"
+        )
+    }
+
     static func test_extraModifierBits_areRemovedAndDisplayOrderIsStable() {
         let raw = UInt32(cmdKey | shiftKey | optionKey | controlKey | alphaLock)
         let value = ScreenshotHotKey(keyCode: UInt32(kVK_ANSI_S), modifiers: raw)
@@ -369,6 +426,23 @@ final class TestHotKeyRecordingDecision {
             "TestHotKeyRecordingDecision.test_validCombination_commitsNormalizedValue"
         )
     }
+
+    static func test_unmodifiedGraveAndFunctionKeys_commitWithoutAddingModifiers() {
+        let keyCodes = [kVK_ANSI_Grave, kVK_F1, kVK_F12, kVK_F20].map(UInt32.init)
+        let decisions = keyCodes.map {
+            ScreenshotHotKey.recordingDecision(keyCode: $0, modifiers: 0)
+        }
+        let expected = keyCodes.map {
+            ScreenshotHotKey.RecordingDecision.commit(
+                ScreenshotHotKey(keyCode: $0, modifiers: 0)
+            )
+        }
+
+        HotKeyTestSupport.expect(
+            decisions == expected,
+            "TestHotKeyRecordingDecision.test_unmodifiedGraveAndFunctionKeys_commitWithoutAddingModifiers"
+        )
+    }
 }
 
 final class TestHotKeyAppConfigMigration {
@@ -523,6 +597,28 @@ final class TestHotKeyTransaction {
                 && registrar.events.count == eventCount
                 && state.persisted == oldKey,
             "TestHotKeyTransaction.test_sameValue_isSuccessfulNoOpWithoutRegistrationOrSave"
+        )
+    }
+
+    static func test_unmodifiedFunctionKey_preservesZeroModifiersThroughRegistrationAndActivation() {
+        let registrar = TestHotKeyRegistrar(outcomes: [.success(), .success()])
+        let state = TestHotKeyRuntimeState(persisted: oldKey, saveOutcomes: [true])
+        let manager = makeManager(registrar: registrar, state: state)
+        let candidate = ScreenshotHotKey(
+            keyCode: UInt32(kVK_F12),
+            modifiers: 0
+        )
+
+        let result = manager.apply(candidate)
+
+        HotKeyTestSupport.expect(
+            result == .applied
+                && manager.effectiveHotKey == candidate
+                && state.persisted == candidate
+                && registrar.registrations.count == 2
+                && registrar.registrations[1].hotKey.modifiers == 0
+                && registrar.registrations[1].isActive,
+            "TestHotKeyTransaction.test_unmodifiedFunctionKey_preservesZeroModifiersThroughRegistrationAndActivation"
         )
     }
 
@@ -854,6 +950,10 @@ final class TestHotKeyStartupRegistration {
 enum HotKeyTests {
     static func main() {
         TestHotKeyValueContract.test_defaultValue_isControlOptionE()
+        TestHotKeyValueContract.test_unmodifiedGraveAndFunctionKeys_areValidAndReadable()
+        TestHotKeyValueContract
+            .test_unmodifiedOrdinaryKeys_areRejectedAcrossTypingNavigationPunctuationAndKeypad()
+        TestHotKeyValueContract.test_ordinaryKeyWithEachSupportedModifier_remainsValid()
         TestHotKeyValueContract.test_extraModifierBits_areRemovedAndDisplayOrderIsStable()
         TestHotKeyValueContract.test_decodingJSON_normalizesCarbonModifierBits()
         TestHotKeyValueContract.test_missingKeyOrModifierAndReservedKeys_areInvalid()
@@ -873,12 +973,16 @@ enum HotKeyTests {
         TestHotKeyRecordingDecision.test_deleteKeysWithOrWithoutModifiers_requestDefault()
         TestHotKeyRecordingDecision.test_modifierOnlyWaitsAndPlainKeyRejectsWithoutEndingRecording()
         TestHotKeyRecordingDecision.test_validCombination_commitsNormalizedValue()
+        TestHotKeyRecordingDecision
+            .test_unmodifiedGraveAndFunctionKeys_commitWithoutAddingModifiers()
 
         TestHotKeyAppConfigMigration.test_missingHotKeyField_loadsDefaultWithoutBackupAndPreservesAzureValues()
         TestHotKeyAppConfigMigration.test_newConfig_codableAndFileRoundTripPreservesAllFields()
 
         TestHotKeyTransaction.test_success_candidateIsInactiveUntilSaveAndOldKeyUnregisterThenOnlyNewKeyFires()
         TestHotKeyTransaction.test_sameValue_isSuccessfulNoOpWithoutRegistrationOrSave()
+        TestHotKeyTransaction
+            .test_unmodifiedFunctionKey_preservesZeroModifiersThroughRegistrationAndActivation()
         TestHotKeyTransaction.test_installOrRegisterFailure_keepsOldKeyAndNeverSaves()
         TestHotKeyTransaction.test_saveFailure_cleansCandidateAndKeepsOldKey()
         TestHotKeyTransaction.test_saveFailureAndCandidateCleanupFailure_locksWithInactiveCandidate()

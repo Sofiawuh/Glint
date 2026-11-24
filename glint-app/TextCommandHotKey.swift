@@ -10,9 +10,13 @@ struct TextCommandHotKey: Codable, Equatable {
         case commit(TextCommandHotKey)
     }
 
-    static let `default` = TextCommandHotKey(
+    static let legacyDefault = TextCommandHotKey(
         keyCode: UInt32(kVK_ANSI_T),
         modifiers: UInt32(controlKey | optionKey)
+    )
+    static let `default` = TextCommandHotKey(
+        keyCode: UInt32(kVK_ANSI_Grave),
+        modifiers: 0
     )
 
     let keyCode: UInt32

@@ -132,7 +132,7 @@ final class HotKeyRecorderControl: NSControl {
             NSGraphicsContext.restoreGraphicsState()
         }
 
-        let text = isRecording ? "请按新的快捷键…" : hotKey.displayString
+        let text = isRecording ? "请按快捷键…" : hotKey.displayString
         let color: NSColor = isRecording ? .controlAccentColor : .labelColor
         let attributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: isRecording ? .medium : .regular),
