@@ -1679,13 +1679,13 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
     func beginSelectionTranslation(text: String, anchorTopLeft: NSPoint) {
         prepareForSelectionAction(text: text)
         let preferences = AppConfig.shared.translationPreferences
-        let formattedSource = SmartTranslationFormatter.format(text, mode: preferences.formattingMode)
+        let sourceText = text
         let state = TranslationWorkbenchState(
             historyID: UUID().uuidString,
-            sourceText: formattedSource,
+            sourceText: sourceText,
             translatedText: "",
             sourceLanguage: "auto",
-            targetLanguage: preferences.targetLanguage(for: formattedSource),
+            targetLanguage: preferences.targetLanguage(for: sourceText),
             targetMode: preferences.targetMode,
             fixedTargetLanguage: preferences.fixedTargetLanguage,
             formattingMode: preferences.formattingMode,
@@ -1751,9 +1751,9 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                 self.translationWorkbench = current
                 self.persistWorkbenchPreferences(current, workspace: workspace)
                 if mode == .strict {
-                    workspace?.setStatus("已切换严格保留；翻译不会调用 GPT")
+                    workspace?.setStatus("已切换严格保留；普通翻译只使用 Azure Translator")
                 } else {
-                    workspace?.setStatus("已切换\(mode.displayName)；点击底部一键按钮后处理")
+                    workspace?.setStatus("已切换\(mode.displayName)；只有点击排版或润色时才调用 GPT")
                 }
             }
             workspace.onRetranslate = { [weak self] in self?.startWorkbenchTranslation() }
@@ -1857,8 +1857,8 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
             workspace.setPairAIProcessing(false)
         }
         let mode = workspace.formattingMode
-        let formattedSource = SmartTranslationFormatter.format(workspace.sourceText, mode: mode)
-        let formattedTranslation = SmartTranslationFormatter.format(workspace.translatedText, mode: mode)
+        let formattedSource = workspace.sourceText
+        let formattedTranslation = workspace.translatedText
         state.setFormattingMode(mode)
         state.editSource(formattedSource)
         state.editTranslation(formattedTranslation)
@@ -1870,7 +1870,8 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
         workspace.updateTexts(
             source: formattedSource,
             translation: formattedTranslation,
-            sourceLanguage: state.sourceLanguage
+            sourceLanguage: state.sourceLanguage,
+            sourceIsDirty: state.isSourceDirty
         )
         workspace.setLoading(true, message: "正在翻译…")
         translationRequestInFlight = true
@@ -1895,20 +1896,12 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                     detectedSourceLanguage: translated.detectedSourceLanguage
                 ) else { return }
                 self.translationWorkbench = current
-                if let sourceBlocks = translated.sourceBlocks,
-                   let translationBlocks = translated.translationBlocks {
-                    workspace?.updateReports(
-                        source: TranslationBlockRenderer.render(blocks: sourceBlocks),
-                        translation: TranslationBlockRenderer.render(blocks: translationBlocks),
-                        sourceLanguage: current.sourceLanguage
-                    )
-                } else {
-                    workspace?.updateTexts(
-                        source: current.sourceText,
-                        translation: current.translatedText,
-                        sourceLanguage: current.sourceLanguage
-                    )
-                }
+                workspace?.updateTexts(
+                    source: current.sourceText,
+                    translation: current.translatedText,
+                    sourceLanguage: current.sourceLanguage,
+                    sourceIsDirty: current.isSourceDirty
+                )
                 workspace?.setTargetLanguage(current.targetLanguage, mode: current.targetMode)
                 workspace?.setLoading(false, message: "翻译完成")
                 self.recordRecentResult(.translationSucceeded(
@@ -2007,10 +2000,11 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                     text: processed.text
                 ) else { return }
                 self.translationWorkbench = current
-                workspace?.updateReport(
-                    TranslationBlockRenderer.render(blocks: processed.blocks),
+                workspace?.updateText(
+                    processed.text,
                     field: request.field,
-                    sourceLanguage: current.sourceLanguage
+                    sourceLanguage: current.sourceLanguage,
+                    sourceIsDirty: current.isSourceDirty
                 )
                 workspace?.setAIProcessing(field: nil, message: "\(actionName)完成")
                 self.recordRecentResult(.translationSucceeded(
@@ -2024,11 +2018,11 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                 _ = current.failAIProcessing(generation: request.generation)
                 self.translationWorkbench = current
                 workspace?.setAIProcessing(field: nil)
-            case .failure(let error):
+            case .failure:
                 _ = current.failAIProcessing(generation: request.generation)
                 self.translationWorkbench = current
                 workspace?.setAIProcessing(field: nil)
-                workspace?.setStatus(error.localizedDescription, isError: true)
+                workspace?.setStatus("智能处理未完成，当前内容未改变")
             }
             gAppDelegate?.refreshMenu()
         }
@@ -2068,12 +2062,16 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                     translatedText: processed.translatedText
                 ) else { return }
                 self.translationWorkbench = current
-                workspace?.updateReports(
-                    source: TranslationBlockRenderer.render(blocks: processed.sourceBlocks),
-                    translation: TranslationBlockRenderer.render(blocks: processed.translationBlocks),
-                    sourceLanguage: current.sourceLanguage
+                workspace?.updateTexts(
+                    source: current.sourceText,
+                    translation: current.translatedText,
+                    sourceLanguage: current.sourceLanguage,
+                    sourceIsDirty: current.isSourceDirty
                 )
-                workspace?.setPairAIProcessing(false, message: "\(actionName)完成")
+                let completionMessage = processed.sourceApplied && processed.translationApplied
+                    ? "\(actionName)完成"
+                    : "\(actionName)部分完成；未完成的一侧保持原样"
+                workspace?.setPairAIProcessing(false, message: completionMessage)
                 self.recordRecentResult(.translationSucceeded(
                     id: current.historyID,
                     sourceText: current.sourceText,
@@ -2085,11 +2083,11 @@ final class PopupController: NSObject, NSWindowDelegate, NSTextFieldDelegate, AV
                 _ = current.failPairAIProcessing(generation: request.generation)
                 self.translationWorkbench = current
                 workspace?.setPairAIProcessing(false)
-            case .failure(let error):
+            case .failure:
                 _ = current.failPairAIProcessing(generation: request.generation)
                 self.translationWorkbench = current
                 workspace?.setPairAIProcessing(false)
-                workspace?.setStatus(error.localizedDescription, isError: true)
+                workspace?.setStatus("智能处理未完成，当前内容未改变")
             }
             gAppDelegate?.refreshMenu()
         }

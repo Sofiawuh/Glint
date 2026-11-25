@@ -35,18 +35,20 @@ enum TranslationServiceOrchestrationContractTestSupport {
 
 final class TestTranslationServiceStrictOrchestration {
     static func test_strictMode_translatesOnceAndNeverCallsAIPostprocessor() async {
+        let source = "Line one.  \r\nLine two.\t\n"
+        let translatorText = "基础译文。  \r\n第二行。"
         var translatorCalls = 0
         var aiCalls = 0
         var translatorInput: (text: String, target: String)?
         let result = await translateDocument(
-            "Line one.  \r\nLine two.\t\n",
+            source,
             targetLanguage: "zh-Hans",
             formattingMode: .strict,
             translator: { text, targetLanguage in
                 translatorCalls += 1
                 translatorInput = (text, targetLanguage)
                 return (
-                    translatedText: "基础译文。  \r\n第二行。",
+                    translatedText: translatorText,
                     detectedSourceLanguage: "en"
                 )
             },
@@ -63,10 +65,10 @@ final class TestTranslationServiceStrictOrchestration {
         TranslationServiceOrchestrationContractTestSupport.expect(
             translatorCalls == 1
                 && aiCalls == 0
-                && translatorInput?.text == "Line one.\nLine two.\n"
+                && translatorInput?.text == source
                 && translatorInput?.target == "zh-Hans"
-                && value?.sourceText == "Line one.\nLine two.\n"
-                && value?.translatedText == "基础译文。\n第二行。"
+                && value?.sourceText == source
+                && value?.translatedText == translatorText
                 && value?.detectedSourceLanguage == "en"
                 && value?.aiProcessingState == .notRequested,
             "TestTranslationServiceStrictOrchestration.test_strictMode_translatesOnceAndNeverCallsAIPostprocessor"
@@ -140,6 +142,74 @@ final class TestTranslationServiceTranslatorFirstOrchestration {
             "TestTranslationServiceTranslatorFirstOrchestration.test_polishMode_defaultTranslation_callsTranslatorOnceAndNeverCallsAI"
         )
     }
+
+    static func test_mixedFactsAndLists_nonEmptyTranslatorTextIsReturnedWithoutContentValidation() async {
+        let source = """
+        Fictional notice for CASE-2141
+
+        1. Due: 2026-12-01 09:30
+        2. Amount: USD 1,234.50 (25%)
+        3. URL: https://example.invalid/status?id=2141
+        4. Email: owner@example.invalid
+        5. Path: /fictional/reports/CASE-2141.txt
+        """
+        let translatorText = """
+        虚构通知（编号已由翻译服务自然改写）
+
+        • 截止时间：2026 年 12 月 1 日上午 9:30
+        • 金额：1,234.50 美元，比例为百分之二十五
+        • 状态页和联系人信息见原始请求
+        • 报告位于新的本地目录
+        """
+        var translatorCalls = 0
+        var aiCalls = 0
+
+        let result = await translateDocument(
+            source,
+            targetLanguage: "zh-Hans",
+            formattingMode: .smart,
+            translator: { _, _ in
+                translatorCalls += 1
+                return (translatedText: translatorText, detectedSourceLanguage: "en")
+            },
+            aiPostprocessor: { _, _, _ in
+                aiCalls += 1
+                return nil
+            }
+        )
+        let value = TranslationServiceOrchestrationContractTestSupport.successfulValue(result)
+
+        TranslationServiceOrchestrationContractTestSupport.expect(
+            translatorCalls == 1
+                && aiCalls == 0
+                && value?.translatedText == translatorText
+                && value?.aiProcessingState == .notRequested,
+            "TestTranslationServiceTranslatorFirstOrchestration.test_mixedFactsAndLists_nonEmptyTranslatorTextIsReturnedWithoutContentValidation"
+        )
+    }
+}
+
+final class TestTranslationServiceErrorAttribution {
+    static func test_invalidTranslatorResponse_namesTranslatorAndNeverMentionsGPT() {
+        let message = TranslationServiceError.invalidResponse.errorDescription ?? ""
+
+        TranslationServiceOrchestrationContractTestSupport.expect(
+            message.contains("Azure Translator") && !message.contains("GPT"),
+            "TestTranslationServiceErrorAttribution.test_invalidTranslatorResponse_namesTranslatorAndNeverMentionsGPT"
+        )
+    }
+
+    static func test_manualAIInvalidResponse_usesNeutralUnchangedMessage() {
+        let message = TranslationServiceError.invalidAIResponse.errorDescription ?? ""
+
+        TranslationServiceOrchestrationContractTestSupport.expect(
+            message.contains("智能处理未完成")
+                && message.contains("当前内容未改变")
+                && !message.contains("受保护内容")
+                && !message.contains("格式异常"),
+            "TestTranslationServiceErrorAttribution.test_manualAIInvalidResponse_usesNeutralUnchangedMessage"
+        )
+    }
 }
 
 @main
@@ -148,6 +218,9 @@ enum TranslationServiceOrchestrationContractTests {
         await TestTranslationServiceStrictOrchestration.test_strictMode_translatesOnceAndNeverCallsAIPostprocessor()
         await TestTranslationServiceTranslatorFirstOrchestration.test_smartMode_defaultTranslation_callsTranslatorOnceAndNeverCallsAI()
         await TestTranslationServiceTranslatorFirstOrchestration.test_polishMode_defaultTranslation_callsTranslatorOnceAndNeverCallsAI()
+        await TestTranslationServiceTranslatorFirstOrchestration.test_mixedFactsAndLists_nonEmptyTranslatorTextIsReturnedWithoutContentValidation()
+        TestTranslationServiceErrorAttribution.test_invalidTranslatorResponse_namesTranslatorAndNeverMentionsGPT()
+        TestTranslationServiceErrorAttribution.test_manualAIInvalidResponse_usesNeutralUnchangedMessage()
 
         print(
             TranslationServiceOrchestrationContractTestSupport.failures == 0

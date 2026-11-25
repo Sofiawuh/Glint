@@ -175,12 +175,17 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         translationView.scrollRangeToVisible(NSRange(location: 0, length: 0))
     }
 
-    func updateTexts(source: String, translation: String, sourceLanguage: String) {
+    func updateTexts(
+        source: String,
+        translation: String,
+        sourceLanguage: String,
+        sourceIsDirty: Bool = false
+    ) {
         isProgrammaticChange = true
         setPlainText(source, in: sourceView)
         setPlainText(translation, in: translationView)
         isProgrammaticChange = false
-        sourceIsDirty = false
+        self.sourceIsDirty = sourceIsDirty
         sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
         updateAdaptiveHeight(source: source, translation: translation)
         applyReadOnlyState()
@@ -218,6 +223,25 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
         }
         isProgrammaticChange = false
         if field == .source { sourceIsDirty = true }
+        sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
+        updateAdaptiveHeight(source: sourceView.string, translation: translationView.string)
+        applyReadOnlyState()
+    }
+
+    func updateText(
+        _ text: String,
+        field: TranslationWorkbenchField,
+        sourceLanguage: String,
+        sourceIsDirty: Bool = false
+    ) {
+        isProgrammaticChange = true
+        if field == .source {
+            setPlainText(text, in: sourceView)
+            self.sourceIsDirty = sourceIsDirty
+        } else {
+            setPlainText(text, in: translationView)
+        }
+        isProgrammaticChange = false
         sourceLanguageLabel.stringValue = Self.languageTitle(sourceLanguage, fallback: "自动识别")
         updateAdaptiveHeight(source: sourceView.string, translation: translationView.string)
         applyReadOnlyState()
@@ -624,7 +648,14 @@ final class TranslationWorkspaceView: NSView, NSTextViewDelegate {
     }
 
     private func setPlainText(_ text: String, in textView: NSTextView) {
-        let report = TranslationBlockRenderer.render(blocks: [.paragraph(text)])
-        textView.textStorage?.setAttributedString(report.attributedText)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 14.5),
+            .foregroundColor: ClaudeTheme.inkBody,
+            .paragraphStyle: MD.bodyStyle()
+        ]
+        textView.textStorage?.setAttributedString(NSAttributedString(
+            string: text,
+            attributes: attributes
+        ))
     }
 }

@@ -196,6 +196,46 @@ final class TestTranslationWorkbenchManualAIGeneration {
             "TestTranslationWorkbenchManualAIGeneration.test_retranslationStartedDuringManualAI_clearsAIStateAndRejectsLateCompletion"
         )
     }
+
+    static func test_independentSideProcessing_sourceSuccessSurvivesTranslationFailure() {
+        var workbench = TranslationWorkbenchState(
+            historyID: "fictional-independent-side-history",
+            sourceText: "Original fictional source.",
+            translatedText: "原始虚构译文。",
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            formattingMode: .smart
+        )
+        guard let sourceRequest = workbench.beginAIProcessing(field: .source, mode: .smart) else {
+            TranslationWorkbenchOrchestrationContractTestSupport.expect(
+                false,
+                "TestTranslationWorkbenchManualAIGeneration.test_independentSideProcessing_sourceSuccessSurvivesTranslationFailure"
+            )
+            return
+        }
+        let sourceAccepted = workbench.completeAIProcessing(
+            generation: sourceRequest.generation,
+            field: .source,
+            text: "Formatted fictional source."
+        )
+        guard let translationRequest = workbench.beginAIProcessing(field: .translation, mode: .smart) else {
+            TranslationWorkbenchOrchestrationContractTestSupport.expect(
+                false,
+                "TestTranslationWorkbenchManualAIGeneration.test_independentSideProcessing_sourceSuccessSurvivesTranslationFailure"
+            )
+            return
+        }
+        let failureAccepted = workbench.failAIProcessing(generation: translationRequest.generation)
+
+        TranslationWorkbenchOrchestrationContractTestSupport.expect(
+            sourceAccepted
+                && failureAccepted
+                && workbench.sourceText == "Formatted fictional source."
+                && workbench.translatedText == "原始虚构译文。"
+                && workbench.aiFieldInFlight == nil,
+            "TestTranslationWorkbenchManualAIGeneration.test_independentSideProcessing_sourceSuccessSurvivesTranslationFailure"
+        )
+    }
 }
 
 final class TestTranslationWorkbenchPairAIGeneration {
@@ -357,6 +397,7 @@ enum TranslationWorkbenchOrchestrationContractTests {
         TestTranslationWorkbenchManualAIGeneration.test_sourceEdit_rejectsLateSourceAIResponseWithoutChangingEitherEditor()
         TestTranslationWorkbenchManualAIGeneration.test_translationAICompletion_onlyChangesRequestedTranslationEditor()
         TestTranslationWorkbenchManualAIGeneration.test_retranslationStartedDuringManualAI_clearsAIStateAndRejectsLateCompletion()
+        TestTranslationWorkbenchManualAIGeneration.test_independentSideProcessing_sourceSuccessSurvivesTranslationFailure()
         TestTranslationWorkbenchPairAIGeneration.test_smartAndPolish_captureCurrentSourceAndTranslationInOnePairRequest()
         TestTranslationWorkbenchPairAIGeneration.test_pairAICompletion_updatesBothEditorsAtomicallyAndClearsProcessingState()
         TestTranslationWorkbenchPairAIGeneration.test_editingEitherEditor_rejectsLatePairAIResponseAndClearsProcessingState()
