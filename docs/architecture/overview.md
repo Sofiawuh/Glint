@@ -17,11 +17,10 @@ flowchart LR
     AppCore --> Geo["几何定位\nGeometry.swift"]
     AppCore --> PopupState["内容窗生命周期\nPopupLifecycle.swift"]
     AppCore --> RecentResults["进程内最近结果\nRecentResults.swift\nRecentResultsPresentation.swift"]
-    AppCore --> TranslationDomain["翻译领域层\nTranslationFormatting.swift\nTranslationDocument.swift\nTranslationWorkbench.swift"]
-    TranslationDomain --> TranslationAI["GPT 后处理与校验\nTranslationAIService.swift\nTranslationContentValidator.swift"]
-    TranslationAI --> TranslationRenderer["结构化报告渲染\nTranslationBlockRenderer.swift"]
+    AppCore --> TranslationDomain["翻译领域层\nTranslationService.swift\nTranslationWorkbench.swift"]
+    TranslationDomain --> TranslationAI["按需 GPT 普通文本处理\nTranslationAIService.swift"]
+    TranslationAI --> TranslationUI
     TranslationDomain --> TranslationUI["双编辑工作台与富文本复制\nTranslationWorkspaceView.swift\nTranslationClipboard.swift"]
-    TranslationRenderer --> TranslationUI
     AppCore --> Markdown["Markdown 渲染\nMarkdown.swift"]
     AppCore --> Settings["基础 / 权限 / Azure 设置\nSettings.swift"]
     TextHotKey --> HotKeyDomain["双快捷键注册与切换事务\nTextCommandHotKey.swift / HotKey.swift"]
@@ -42,8 +41,8 @@ flowchart LR
 - **双快捷键事务**（[ScreenshotHotKey.swift](../../glint-app/ScreenshotHotKey.swift)、[TextCommandHotKey.swift](../../glint-app/TextCommandHotKey.swift)、[HotKey.swift](../../glint-app/HotKey.swift)）：截图和文字命令拥有独立配置与 Carbon 注册；`` ` `` 与 `F1–F20` 可以零修饰键注册，其他键必须包含 Control、Option、Shift 或 Command。候选先以非激活状态注册，只有持久化成功且旧注册安全注销后才切换；两套快捷键不得相同。
 - **主控与会话浮窗**（[main.swift](../../glint-app/main.swift)）：连接快捷键、按需取词、命令面板、翻译、流式对话与截图流程。全局事件 Tap 只处理命令面板外部点击、Escape 与自愈，不观察选区手势。
 - **最近结果**（[RecentResults.swift](../../glint-app/RecentResults.swift)、[RecentResultsPresentation.swift](../../glint-app/RecentResultsPresentation.swift)）：只在成功文字翻译或完整文字问答结束后写入纯文本快照；最多 10 条且总量不超过 10 MB。同一问答会话更新原条目，截图、草稿、错误和未完成流不进入历史。菜单按 ID 路由到唯一只读内容窗，不触发 Azure 请求。
-- **智能翻译工作台**（[TranslationFormatting.swift](../../glint-app/TranslationFormatting.swift)、[TranslationDocument.swift](../../glint-app/TranslationDocument.swift)、[TranslationService.swift](../../glint-app/TranslationService.swift)、[TranslationWorkbench.swift](../../glint-app/TranslationWorkbench.swift)、[TranslationWorkspaceView.swift](../../glint-app/TranslationWorkspaceView.swift)）：本地层优先保留源应用已有换行、空行、列表和签名；Translator 按稳定 ID 拆片、预算分批并原位重组。初次翻译和重新翻译只调用 Translator；智能排版 / 润色由用户点击底部一键按钮后才调用 Azure GPT 同时处理两侧，并由 [TranslationContentValidator.swift](../../glint-app/TranslationContentValidator.swift) 执行字符忠实或事实保护校验。原文和译文均可编辑，重新翻译、单侧 AI 与双侧一键 AI 使用独立代际阻止晚到响应覆盖新内容。工作台只报告 430–760 pt 的内容推荐高度，实际 frame 始终由 `PopupController` 统一控制并铺满面板；完整内容更新可在用户未手动缩放时按顶部锚点自适应扩缩，手动尺寸在当前窗口内优先。
-- **结构化报告、复制与朗读**（[TranslationBlockRenderer.swift](../../glint-app/TranslationBlockRenderer.swift)、[TranslationClipboard.swift](../../glint-app/TranslationClipboard.swift)、[Config.swift](../../glint-app/Config.swift)）：已校验区块由固定 AppKit 样式渲染，模型不能控制视觉；纯文本复制保留内容结构，RTF 复制保留富文本层级。Speech 只持久化 Endpoint 与 Key，将 Portal Endpoint 转为 TTS URL，并自动选择 Neural Voice；原文 / 译文互斥播放，再点当前按钮停止，音频不落盘。
+- **智能翻译工作台**（[TranslationService.swift](../../glint-app/TranslationService.swift)、[TranslationWorkbench.swift](../../glint-app/TranslationWorkbench.swift)、[TranslationWorkspaceView.swift](../../glint-app/TranslationWorkspaceView.swift)）：初次翻译和重新翻译只调用 Translator；普通长度文本单次提交，超预算时只按空行、换行和长度切分，按顺序直接拼接非空译文，不注入保护占位符，也不做数字、日期、实体、字符或列表校验。智能排版 / 润色只有用户主动点击时才调用 Azure GPT，GPT 返回非空普通文本就直接更新对应编辑区；双侧一键处理分别请求，两侧独立成功。重新翻译、单侧 AI 与双侧一键 AI 继续使用代际阻止晚到响应覆盖新内容。工作台只报告 430–760 pt 的内容推荐高度，实际 frame 始终由 `PopupController` 统一控制并铺满面板；完整内容更新可在用户未手动缩放时按顶部锚点自适应扩缩，手动尺寸在当前窗口内优先。
+- **复制与朗读**（[TranslationClipboard.swift](../../glint-app/TranslationClipboard.swift)、[Config.swift](../../glint-app/Config.swift)）：编辑区当前普通文本以一致的 AppKit 基础样式显示，纯文本与 RTF 复制都以当前编辑内容为准。Speech 只持久化 Endpoint 与 Key，将 Portal Endpoint 转为 TTS URL，并自动选择 Neural Voice；原文 / 译文互斥播放，再点当前按钮停止，音频不落盘。历史 `TranslationContentValidator` 与 `TranslationBlockRenderer` 类型暂留兼容，但不参与生产翻译或手动 GPT 主链路。
 - **几何定位**（[Geometry.swift](../../glint-app/Geometry.swift)）：负责鼠标附近命令面板、内容浮窗边界夹紧以及多显示器截图坐标转换，不读取 AX 选区 bounds。
 - **Azure 配置与协议**（[Config.swift](../../glint-app/Config.swift)、[SecureCredentialStore.swift](../../glint-app/SecureCredentialStore.swift)、[Settings.swift](../../glint-app/Settings.swift)）：Azure Translator、Azure OpenAI v1、Azure Speech 的 API Key 只进入 macOS Keychain；JSON 只持久化 Endpoint、Region、Deployment、翻译工作台最后选择及两套快捷键。旧明文配置在 Keychain 三项写入全部成功后才会原子改写为无 Key JSON，未知旧 JSON 的备份会递归移除 `apiKey` 字段。基础设置不再重复展示翻译目标和文本处理，Azure 页提供三组真实连接探测。
 - **构建与打包**（[build.sh](../../glint-app/build.sh)）：生成 `arm64 + x86_64` Universal Binary、固定签名的 `Glint.app` 与 `Glint.dmg`。
@@ -75,15 +74,14 @@ sequenceDiagram
         Panel-->>User: 鼠标右下直接显示“翻译｜提问”
         alt 点击翻译
             Panel->>Popup: 提交文本并关闭命令面板
-            Popup->>Popup: 保留原结构并按稳定 ID 拆片
-            Popup->>Translator: 分批翻译可翻译片段
+            Popup->>Translator: 普通文本请求；超预算时仅按长度分片
             Translator-->>Popup: 返回译文与检测语言
-            Popup->>Popup: 打开双编辑结构化报告工作台
+            Popup->>Popup: 非空译文直接进入双编辑工作台
             Popup->>History: 成功后写入或更新同 ID 翻译快照
             opt 用户点击一键智能排版或润色
-                Popup->>GPT: 一次或按长文本分批提交当前原文与译文
-                GPT-->>Popup: 返回白名单结构化区块
-                Popup->>Popup: 忠实性 / 事实保护校验并原子更新两侧
+                Popup->>GPT: 原文与译文分别提交普通文本请求
+                GPT-->>Popup: 返回处理后的普通文本
+                Popup->>Popup: 非空结果按侧独立更新，失败侧保持原样
                 Popup->>History: 更新同 ID 翻译快照
             end
             opt 用户朗读原文或译文
@@ -118,5 +116,5 @@ sequenceDiagram
 - **双快捷键约束**：截图与文字命令快捷键不能相同；只有 `` ` `` 与 `F1–F20` 允许不带修饰键；注册、持久化或旧注册注销失败时，旧有效快捷键继续工作。
 - **隐私约束**：Azure Key 仅保存在当前用户的 macOS Keychain；配置 JSON 与迁移备份不得出现 `apiKey` 字段或 Key 值，日志不得记录凭据、真实选中文字、剪贴板正文或聊天正文。
 - **会话约束**：选中文字与截图上下文仅保存在当前进程内存中；Azure Translator 负责所有默认翻译，Azure OpenAI v1 只在用户主动点击智能排版 / 润色、提问、追问或截图理解时调用，Azure Speech 只处理用户主动点击朗读时的当前编辑内容。
-- **排版约束**：本地层不得主动合并已有行。智能排版的 GPT 输出移除 Unicode 空白后必须与输入字符序列完全一致；智能润色必须保留全部受保护事实和列表顺序；任何解析、网络或校验失败都回退到 Translator 结果。严格模式只规范换行编码和尾随空格。
+- **简单结果约束**：Translator 成功返回非空译文后直接显示，不以数字、日期、实体、占位符或结构一致性拒绝结果。GPT 只在用户主动点击排版或润色时调用，非空普通文本直接采用；GPT 失败只保留当前编辑内容并显示中性提示，不改变普通翻译的成功状态。
 - **历史约束**：最近结果只存在于当前进程内存，不序列化；只保存文字结果的纯文本快照，不保存 AppKit 视图、截图、Base64、Timer、网络任务或 Azure messages。浏览历史时只有一个内容窗，当前空闲草稿可切回恢复。

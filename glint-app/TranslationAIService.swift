@@ -63,11 +63,23 @@ struct TranslationAIService {
 
     func buildSingleRequest(text: String, mode: TranslationFormattingMode) -> URLRequest? {
         guard mode != .strict else { return nil }
-        let system = """
-        Return JSON only with exactly one key named blocks. Allowed block types: salutation, heading, paragraph, key_points, quote, code, table, signature. Never return HTML, Markdown fences, CSS, colors, fonts, sizes or decorative labels.
-        Build a restrained, readable business-report hierarchy while preserving existing paragraphs, lists, quotes, tables, code and signatures in order. Use key_points only for real bullets, numbered steps, requests, decisions, risks, deadlines or action items. Use heading only for a genuine existing heading. Never invent, summarize, omit, merge or duplicate content.
-        Smart mode may only change Unicode whitespace and must preserve each non-whitespace character in order; keep existing list markers inside key_points items. Polish mode may improve language while preserving every factual token, list fact count and list order. When uncertain, keep a paragraph.
-        """
+        let system: String
+        switch mode {
+        case .smart:
+            system = """
+            Reformat the complete input text so it is clear, polished and easy to scan.
+            Improve paragraph breaks, headings, lists and reading hierarchy where useful.
+            Return only the complete reformatted text. Do not explain your work and do not wrap the result in a code fence.
+            """
+        case .polish:
+            system = """
+            Polish the complete input text for natural grammar, wording, tone and readability.
+            Keep the intended meaning while making the writing fluent and professional.
+            Return only the complete polished text. Do not explain your work and do not wrap the result in a code fence.
+            """
+        case .strict:
+            return nil
+        }
         return config.buildRequest(
             messages: [
                 ["role": "system", "content": system],
@@ -91,13 +103,14 @@ struct TranslationAIService {
     }
 
     func parseSingleResponse(data: Data) -> [TranslationBlock]? {
-        guard let content = config.parseResponse(data: data),
-              let object = Self.parseJSONObject(content),
-              Set(object.keys) == Set(["blocks"]),
-              let objects = object["blocks"] as? [[String: Any]],
-              let blocks = Self.parseBlocks(objects),
-              !blocks.isEmpty else { return nil }
-        return blocks
+        guard let text = parsePlainTextResponse(data: data) else { return nil }
+        return [.paragraph(text)]
+    }
+
+    func parsePlainTextResponse(data: Data) -> String? {
+        guard let content = config.parseResponse(data: data) else { return nil }
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     private static func parseJSONObject(_ content: String) -> [String: Any]? {

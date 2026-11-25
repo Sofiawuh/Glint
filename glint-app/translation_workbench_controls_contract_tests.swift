@@ -110,6 +110,69 @@ final class TestTranslationWorkbenchControlSurface {
     }
 }
 
+final class TestTranslationWorkbenchSourceDirtyPresentation {
+    private static func configuredView(
+        mode: TranslationFormattingMode
+    ) -> TranslationWorkspaceView {
+        let view = TranslationWorkspaceView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+        view.configure(
+            sourceText: "Original fictional source CASE-2141.",
+            translatedText: "原始虚构译文 CASE-2141。",
+            sourceLanguage: "en",
+            targetLanguage: "zh-Hans",
+            formattingMode: mode,
+            readOnly: false
+        )
+        return view
+    }
+
+    private static func oneClickButton(in view: TranslationWorkspaceView) -> NSButton? {
+        TranslationWorkbenchControlsContractTestSupport.descendants(of: view, as: NSButton.self)
+            .first {
+                $0.title == "一键智能排版" || $0.title == "一键智能润色"
+            }
+    }
+
+    static func test_sourceAIResultMatchingTranslatedSource_keepsOneClickSmartAndPolishEnabled() {
+        let smartView = configuredView(mode: .smart)
+        smartView.updateText(
+            "Original fictional source CASE-2141.",
+            field: .source,
+            sourceLanguage: "en",
+            sourceIsDirty: false
+        )
+
+        let polishView = configuredView(mode: .polish)
+        polishView.updateText(
+            "Original fictional source CASE-2141.",
+            field: .source,
+            sourceLanguage: "en",
+            sourceIsDirty: false
+        )
+
+        TranslationWorkbenchControlsContractTestSupport.expect(
+            oneClickButton(in: smartView)?.isEnabled == true
+                && oneClickButton(in: polishView)?.isEnabled == true,
+            "TestTranslationWorkbenchSourceDirtyPresentation.test_sourceAIResultMatchingTranslatedSource_keepsOneClickSmartAndPolishEnabled"
+        )
+    }
+
+    static func test_sourceAIResultDifferentFromTranslatedSource_disablesOneClickProcessing() {
+        let view = configuredView(mode: .smart)
+        view.updateText(
+            "AI changed the fictional source CASE-2141.",
+            field: .source,
+            sourceLanguage: "en",
+            sourceIsDirty: true
+        )
+
+        TranslationWorkbenchControlsContractTestSupport.expect(
+            oneClickButton(in: view)?.isEnabled == false,
+            "TestTranslationWorkbenchSourceDirtyPresentation.test_sourceAIResultDifferentFromTranslatedSource_disablesOneClickProcessing"
+        )
+    }
+}
+
 final class TestTranslationWorkbenchLastSelection {
     static func test_selectionChange_roundTripsAsTheNextWorkbenchDefaultWithoutTouchingServices() {
         let url = TranslationWorkbenchControlsContractTestSupport.temporaryConfigURL()
@@ -164,6 +227,8 @@ enum TranslationWorkbenchControlsContractTests {
         _ = NSApplication.shared
         TestTranslationWorkbenchControlSurface.test_footerExposesOneTargetSelectorAndOneThreeModeProcessingSelector()
         TestTranslationWorkbenchControlSurface.test_footerOneClickAIButton_followsModeWhileSingleSideActionsRemainAvailable()
+        TestTranslationWorkbenchSourceDirtyPresentation.test_sourceAIResultMatchingTranslatedSource_keepsOneClickSmartAndPolishEnabled()
+        TestTranslationWorkbenchSourceDirtyPresentation.test_sourceAIResultDifferentFromTranslatedSource_disablesOneClickProcessing()
         TestTranslationWorkbenchLastSelection.test_selectionChange_roundTripsAsTheNextWorkbenchDefaultWithoutTouchingServices()
 
         print(

@@ -30,8 +30,8 @@ struct TranslationAIProcessedBatch: Equatable {
 struct TranslationAIPairEditResult: Equatable {
     let sourceText: String
     let translatedText: String
-    let sourceBlocks: [TranslationBlock]
-    let translationBlocks: [TranslationBlock]
+    let sourceApplied: Bool
+    let translationApplied: Bool
 }
 
 enum TranslationServiceError: LocalizedError, Equatable {
@@ -40,6 +40,7 @@ enum TranslationServiceError: LocalizedError, Equatable {
     case emptyDocument
     case service(String)
     case invalidResponse
+    case invalidAIResponse
     case validationFailed
     case cancelled
 
@@ -54,7 +55,9 @@ enum TranslationServiceError: LocalizedError, Equatable {
         case .service(let message):
             return message
         case .invalidResponse:
-            return "Azure GPT 返回内容不完整或格式异常，已保留处理前内容"
+            return "Azure Translator 未返回可用译文，请稍后重试"
+        case .invalidAIResponse:
+            return "智能处理未完成，当前内容未改变"
         case .validationFailed:
             return "AI 处理结果可能改动受保护内容，已保留处理前内容"
         case .cancelled:
@@ -87,20 +90,19 @@ func translateDocument(
     aiPostprocessor: TranslationAIPostprocessor?
 ) async -> Result<TranslationServiceResult, TranslationServiceError> {
     _ = aiPostprocessor
-    let source = SmartTranslationFormatter.format(text, mode: formattingMode)
+    let source = text
     guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
         return .failure(.emptyDocument)
     }
 
     do {
         let translated = try await translator(source, targetLanguage)
-        let baseTranslation = SmartTranslationFormatter.format(
-            translated.translatedText,
-            mode: formattingMode
-        )
+        guard !translated.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(.invalidResponse)
+        }
         return .success(TranslationServiceResult(
             sourceText: source,
-            translatedText: baseTranslation,
+            translatedText: translated.translatedText,
             detectedSourceLanguage: translated.detectedSourceLanguage,
             targetLanguage: targetLanguage,
             formattingMode: formattingMode,
@@ -125,29 +127,33 @@ func translateDocument(
     completion: @escaping (Result<TranslationServiceResult, TranslationServiceError>) -> Void
 ) -> Task<Void, Never> {
     let translatorConfig = AppConfig.shared.translator
-    let formattedSource = SmartTranslationFormatter.format(text, mode: formattingMode)
-    let document = TranslationDocument(formattedText: formattedSource)
-    let batches = document.batches(limits: .azureDefault)
+    let sourceText = text
+    let chunks = translationTextChunks(
+        sourceText,
+        maximumCharacters: TranslationBatchLimits.azureDefault.maxCharacters
+    )
 
     return Task {
         guard !Task.isCancelled else {
             await MainActor.run { completion(.failure(.cancelled)) }
             return
         }
-        guard !document.fragments.isEmpty, !batches.isEmpty else {
+        guard !sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !chunks.isEmpty else {
             await MainActor.run { completion(.failure(.emptyDocument)) }
             return
         }
 
-        var collected: [TranslationFragmentResponse] = []
-        collected.reserveCapacity(document.fragments.count)
-        for batch in batches {
+        var translatedChunks: [String] = []
+        translatedChunks.reserveCapacity(chunks.count)
+        var detectedLanguage = "auto"
+        for (index, chunk) in chunks.enumerated() {
             guard !Task.isCancelled else {
                 await MainActor.run { completion(.failure(.cancelled)) }
                 return
             }
             guard let request = translatorConfig.buildRequest(
-                fragments: batch,
+                text: chunk,
                 targetLanguage: targetLanguage
             ) else {
                 await MainActor.run { completion(.failure(.invalidConfiguration)) }
@@ -165,11 +171,24 @@ func translateDocument(
                     await MainActor.run { completion(.failure(.service(message))) }
                     return
                 }
-                guard let parsed = translatorConfig.parseFragmentResponses(data: data, fragments: batch) else {
+                let fragment = TranslationFragment(
+                    id: String(format: "translation-chunk-%04d", index),
+                    text: chunk
+                )
+                guard let parsed = translatorConfig.parseFragmentResponses(
+                    data: data,
+                    fragments: [fragment]
+                )?.first,
+                      !parsed.translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     await MainActor.run { completion(.failure(.invalidResponse)) }
                     return
                 }
-                collected.append(contentsOf: parsed)
+                translatedChunks.append(parsed.translatedText)
+                if detectedLanguage == "auto",
+                   let detected = parsed.detectedLanguage,
+                   !detected.isEmpty {
+                    detectedLanguage = detected
+                }
             } catch is CancellationError {
                 await MainActor.run { completion(.failure(.cancelled)) }
                 return
@@ -181,16 +200,16 @@ func translateDocument(
             }
         }
 
-        guard let assembled = document.reassemble(collected) else {
+        let translatedText = translatedChunks.joined()
+        guard !translatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             await MainActor.run { completion(.failure(.invalidResponse)) }
             return
         }
-        let baseTranslation = SmartTranslationFormatter.format(assembled.text, mode: formattingMode)
 
         let result = TranslationServiceResult(
-            sourceText: formattedSource,
-            translatedText: baseTranslation,
-            detectedSourceLanguage: assembled.detectedLanguage ?? "auto",
+            sourceText: sourceText,
+            translatedText: translatedText,
+            detectedSourceLanguage: detectedLanguage,
             targetLanguage: targetLanguage,
             formattingMode: formattingMode,
             sourceBlocks: nil,
@@ -215,75 +234,47 @@ func processTranslationPairWithAI(
 
     let config = AppConfig.shared.azureOpenAI
     let service = TranslationAIService(config: config)
-    let pairs = pairedTextBatches(source: sourceText, translation: translatedText)
-    guard let firstPair = pairs.first,
-          service.buildAutomaticRequest(
-            sourceText: firstPair.source,
-            translatedText: firstPair.translation,
-            mode: mode
-          ) != nil else {
+    guard service.buildSingleRequest(text: sourceText, mode: mode) != nil,
+          service.buildSingleRequest(text: translatedText, mode: mode) != nil else {
         Task { @MainActor in completion(.failure(.invalidAIConfiguration)) }
         return Task {}
     }
 
     return Task {
-        do {
-            var sourceBatches: [TranslationAIProcessedBatch] = []
-            var translationBatches: [TranslationAIProcessedBatch] = []
-            for pair in pairs {
-                guard !Task.isCancelled else { throw TranslationServiceError.cancelled }
-                guard let request = service.buildAutomaticRequest(
-                    sourceText: pair.source,
-                    translatedText: pair.translation,
-                    mode: mode
-                ) else { throw TranslationServiceError.invalidAIConfiguration }
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard !Task.isCancelled else { throw TranslationServiceError.cancelled }
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                guard (200..<300).contains(status) else {
-                    throw TranslationServiceError.service(
-                        config.parseError(statusCode: status, data: data)
-                    )
-                }
-                guard let parsed = service.parseAutomaticResponse(data: data) else {
-                    throw TranslationServiceError.invalidResponse
-                }
-                sourceBatches.append(TranslationAIProcessedBatch(
-                    inputText: pair.source,
-                    blocks: parsed.sourceBlocks
-                ))
-                translationBatches.append(TranslationAIProcessedBatch(
-                    inputText: pair.translation,
-                    blocks: parsed.translationBlocks
-                ))
-            }
-
-            guard let sourceResult = assembleAIProcessedText(
-                originalText: sourceText,
-                batches: sourceBatches,
-                mode: .smart
-            ), let translationResult = assembleAIProcessedText(
-                originalText: translatedText,
-                batches: translationBatches,
-                mode: mode
-            ) else { throw TranslationServiceError.validationFailed }
-
-            let result = TranslationAIPairEditResult(
-                sourceText: sourceResult.text,
-                translatedText: translationResult.text,
-                sourceBlocks: sourceResult.blocks,
-                translationBlocks: translationResult.blocks
-            )
-            await MainActor.run { completion(.success(result)) }
-        } catch is CancellationError {
+        let sourceResult = await performTranslationAITextRequest(
+            sourceText,
+            mode: mode,
+            config: config,
+            service: service
+        )
+        guard !Task.isCancelled else {
             await MainActor.run { completion(.failure(.cancelled)) }
-        } catch let error as TranslationServiceError {
-            await MainActor.run { completion(.failure(error)) }
-        } catch {
-            await MainActor.run {
-                completion(.failure(.service("网络错误：\(error.localizedDescription)")))
-            }
+            return
         }
+        let translationResult = await performTranslationAITextRequest(
+            translatedText,
+            mode: mode,
+            config: config,
+            service: service
+        )
+        guard !Task.isCancelled else {
+            await MainActor.run { completion(.failure(.cancelled)) }
+            return
+        }
+
+        let sourceValue = try? sourceResult.get()
+        let translationValue = try? translationResult.get()
+        guard sourceValue != nil || translationValue != nil else {
+            await MainActor.run { completion(.failure(.invalidAIResponse)) }
+            return
+        }
+        let result = TranslationAIPairEditResult(
+            sourceText: sourceValue ?? sourceText,
+            translatedText: translationValue ?? translatedText,
+            sourceApplied: sourceValue != nil,
+            translationApplied: translationValue != nil
+        )
+        await MainActor.run { completion(.success(result)) }
     }
 }
 
@@ -303,47 +294,83 @@ func processTranslationTextWithAI(
     }
 
     return Task {
-        do {
-            var processedBatches: [TranslationAIProcessedBatch] = []
-            for batch in textBatches {
-                guard !Task.isCancelled else { throw TranslationServiceError.cancelled }
-                guard let request = service.buildSingleRequest(text: batch, mode: mode) else {
-                    throw TranslationServiceError.invalidAIConfiguration
-                }
-                let (data, response) = try await URLSession.shared.data(for: request)
-                guard !Task.isCancelled else { throw TranslationServiceError.cancelled }
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                guard (200..<300).contains(status) else {
-                    throw TranslationServiceError.service(
-                        config.parseError(statusCode: status, data: data)
-                    )
-                }
-                guard let parsed = service.parseSingleResponse(data: data), !parsed.isEmpty else {
-                    throw TranslationServiceError.invalidResponse
-                }
-                processedBatches.append(TranslationAIProcessedBatch(
-                    inputText: batch,
-                    blocks: parsed
-                ))
-            }
-            guard let completedResult = assembleAIProcessedText(
-                originalText: text,
-                batches: processedBatches,
-                mode: mode
-            ) else { throw TranslationServiceError.validationFailed }
+        let result = await performTranslationAITextRequest(
+            text,
+            mode: mode,
+            config: config,
+            service: service
+        )
+        switch result {
+        case .success(let processedText):
             await MainActor.run {
-                completion(.success(completedResult))
+                completion(.success(TranslationAIEditResult(
+                    text: processedText,
+                    blocks: [.paragraph(processedText)]
+                )))
             }
-        } catch is CancellationError {
-            await MainActor.run { completion(.failure(.cancelled)) }
-        } catch let error as TranslationServiceError {
+        case .failure(let error):
             await MainActor.run { completion(.failure(error)) }
-        } catch {
-            await MainActor.run {
-                completion(.failure(.service("网络错误：\(error.localizedDescription)")))
-            }
         }
     }
+}
+
+private func performTranslationAITextRequest(
+    _ text: String,
+    mode: TranslationFormattingMode,
+    config: AzureOpenAIConfig,
+    service: TranslationAIService
+) async -> Result<String, TranslationServiceError> {
+    do {
+        let batches = singleTextBatches(text)
+        guard !batches.isEmpty else { return .failure(.invalidAIResponse) }
+        var outputs: [String] = []
+        outputs.reserveCapacity(batches.count)
+        for batch in batches {
+            guard !Task.isCancelled else { return .failure(.cancelled) }
+            guard let request = service.buildSingleRequest(text: batch, mode: mode) else {
+                return .failure(.invalidAIConfiguration)
+            }
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard !Task.isCancelled else { return .failure(.cancelled) }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(status) else {
+                return .failure(.service(config.parseError(statusCode: status, data: data)))
+            }
+            guard let output = service.parsePlainTextResponse(data: data) else {
+                return .failure(.invalidAIResponse)
+            }
+            outputs.append(output)
+        }
+        let completed = outputs.joined(separator: outputs.count > 1 ? "\n\n" : "")
+        return completed.isEmpty ? .failure(.invalidAIResponse) : .success(completed)
+    } catch is CancellationError {
+        return .failure(.cancelled)
+    } catch {
+        return .failure(.service("网络错误：\(error.localizedDescription)"))
+    }
+}
+
+func translationTextChunks(
+    _ text: String,
+    maximumCharacters: Int = TranslationBatchLimits.azureDefault.maxCharacters
+) -> [String] {
+    let limit = max(1, maximumCharacters)
+    guard !text.isEmpty else { return [] }
+    guard text.count > limit else { return [text] }
+
+    var chunks: [String] = []
+    var remaining = text[...]
+    while remaining.count > limit {
+        let hardEnd = remaining.index(remaining.startIndex, offsetBy: limit)
+        let prefix = remaining[..<hardEnd]
+        let splitIndex = prefix.range(of: "\n\n", options: .backwards)?.upperBound
+            ?? prefix.lastIndex(of: "\n").map { prefix.index(after: $0) }
+            ?? hardEnd
+        chunks.append(String(remaining[..<splitIndex]))
+        remaining = remaining[splitIndex...]
+    }
+    if !remaining.isEmpty { chunks.append(String(remaining)) }
+    return chunks
 }
 
 func assembleAIProcessedText(
